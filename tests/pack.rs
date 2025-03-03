@@ -47,19 +47,20 @@ fn pack_common_verify_stats(file_size: u64, pattern: Pattern) -> Result<PackResp
     let input = create_input_file(&mut td, file_size, seed, pattern.clone())?;
     let response = archive.pack(&input)?;
 
+    assert_eq!(response.stats.size, file_size);
     assert_eq!(response.stats.mapped_size, file_size);
 
     match pattern {
         Pattern::LCG => {
-            assert_eq!(file_size, response.stats.data_written);
+            assert_eq!(file_size, response.stats.written);
             assert_eq!(response.stats.fill_size, 0);
         }
         Pattern::SingleByte(_a) => {
-            assert_eq!(response.stats.data_written, 0);
+            assert_eq!(response.stats.written, 0);
             assert_eq!(response.stats.fill_size, file_size);
         }
         Pattern::Repeating(pattern) => {
-            assert_eq!(response.stats.data_written, pattern.len() as u64);
+            assert_eq!(response.stats.written, pattern.len() as u64);
             assert_eq!(response.stats.fill_size, 0);
         }
     }

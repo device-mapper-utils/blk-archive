@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use nom::{combinator::fail, multi::*, number::complete::*, IResult};
 use num_enum::TryFromPrimitive;
+use rkyv::{Archive, Deserialize, Serialize};
 use serde_json::json;
 use serde_json::to_string_pretty;
 use std::collections::HashMap;
@@ -461,7 +462,14 @@ impl MapInstruction {
 
 pub type IVec = Vec<MapInstruction>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[rkyv(
+    // This will generate a PartialEq impl between our unarchived
+    // and archived types
+    compare(PartialEq),
+    // Derives can be passed through to the generated type:
+    derive(Debug),
+)]
 pub enum MapEntry {
     Fill {
         byte: u8,
@@ -544,7 +552,7 @@ impl VMState {
     // Finds the register that would take the fewest bytes to encode.
     // This doesn't consider the top of the stack (index 0).
     // FIXME: so slow
-    fn nearest_register(&self, slab: u32, offset: u32) -> usize {
+    fn nearest_register(&mut self, slab: u32, offset: u32) -> usize {
         let target = Register { slab, offset };
         let mut index = 0;
         let mut min_cost = Self::distance_cost(self.stack.get(index), &target);

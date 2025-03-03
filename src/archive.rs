@@ -1,16 +1,18 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
+use crate::config::read_config;
 use crate::cuckoo_filter::*;
 use crate::hash::*;
 use crate::hash_index::*;
 use crate::iovec::*;
 use crate::paths;
 use crate::slab::*;
+use clap::ArgMatches;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-pub const SLAB_SIZE_TARGET: usize = 4 * 1024 * 1024;
+pub const SLAB_SIZE_TARGET: u64 = 4 * 1024 * 1024;
 
 pub struct Data {
     seen: CuckooFilter,
@@ -35,8 +37,8 @@ fn complete_slab_(slab: &mut SlabFile, buf: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: usize) -> Result<bool> {
-    if buf.len() > threshold {
+pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: u64) -> Result<bool> {
+    if buf.len() > threshold as usize {
         complete_slab_(slab, buf)?;
         Ok(true)
     } else {
@@ -45,23 +47,45 @@ pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: usize) -
 }
 
 impl Data {
-    pub fn new(
-        data_file: SlabFile,
-        hashes_file: Arc<Mutex<SlabFile>>,
-        slab_capacity: usize,
-    ) -> Result<Self> {
+    pub fn new(cache_entries: Option<u64>, matches: &ArgMatches) -> Result<Self> {
         let seen = CuckooFilter::read(paths::index_path())?;
-        let hashes = lru::LruCache::new(NonZeroUsize::new(slab_capacity).unwrap());
+
+        let config = read_config(".", matches)?;
+
+        let hashes_per_slab = std::cmp::max(SLAB_SIZE_TARGET / config.block_size, 1);
+        let mut slab_capacity = ((config.hash_cache_size_meg * 1024 * 1024)
+            / std::mem::size_of::<Hash256>() as u64)
+            / hashes_per_slab as u64;
+
+        if let Some(cache_entries) = cache_entries {
+            slab_capacity = cache_entries;
+        }
+
+        let hashes = lru::LruCache::new(NonZeroUsize::new(slab_capacity as usize).unwrap());
+        let slabs = lru::LruCache::new(NonZeroUsize::new(slab_capacity as usize).unwrap());
+
+        let data_file = SlabFileBuilder::open(paths::data_path())
+            .write(true)
+            .queue_depth(128)
+            .build()
+            .context("couldn't open data slab file")?;
+
         let nr_slabs = data_file.get_nr_slabs() as u32;
+
+        let hashes_file = Arc::new(Mutex::new(
+            SlabFileBuilder::open(paths::hashes_path())
+                .write(true)
+                .queue_depth(16)
+                .build()
+                .context("couldn't open hashes slab file")?,
+        ));
 
         {
             let hashes_file = hashes_file.lock().unwrap();
             assert_eq!(data_file.get_nr_slabs(), hashes_file.get_nr_slabs());
         }
 
-        let slabs = lru::LruCache::new(NonZeroUsize::new(slab_capacity).unwrap());
-
-        Ok(Self {
+        let mut s = Self {
             seen,
             hashes,
             data_file,
@@ -72,7 +96,12 @@ impl Data {
             data_buf: Vec::new(),
             hashes_buf: Vec::new(),
             slabs,
-        })
+        };
+
+        // TODO make this more dynamic as needed that will work in multi-client env.
+        s.rebuild_index(262144)?;
+
+        Ok(s)
     }
 
     fn get_info(&mut self, slab: u32) -> Result<&ByIndex> {
@@ -170,7 +199,7 @@ impl Data {
             self.rebuild_index(s)?;
         }
 
-        if self.data_buf.len() as u64 + len > SLAB_SIZE_TARGET as u64 {
+        if self.data_buf.len() as u64 + len > SLAB_SIZE_TARGET {
             self.complete_data_slab()?;
         }
 
@@ -204,16 +233,6 @@ impl Data {
             _ => None,
         };
         Ok(rc)
-    }
-
-    // NOTE: This won't work for multiple clients and one server!
-    pub fn file_sizes(&mut self) -> (u64, u64) {
-        let hashes_written = {
-            let hashes_file = self.hashes_file.lock().unwrap();
-            hashes_file.get_file_size()
-        };
-
-        (self.data_file.get_file_size(), hashes_written)
     }
 
     fn calculate_offsets(

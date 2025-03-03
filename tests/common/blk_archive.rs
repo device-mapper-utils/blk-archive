@@ -15,9 +15,11 @@ pub struct BlkArchive {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct PackStats {
-    pub data_written: u64,
+    pub written: u64,
     pub mapped_size: u64,
     pub fill_size: u64,
+    pub stream_written: u64,
+    pub size: u64,
 }
 #[derive(Deserialize, Serialize, Debug)]
 pub struct PackResponse {
