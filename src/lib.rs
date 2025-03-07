@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod archive_transport;
 pub mod chunkers;
 pub mod client;
 pub mod config;

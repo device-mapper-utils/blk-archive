@@ -1,8 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::prelude::*;
 use clap::ArgMatches;
-//use size_display::Size;
-use blake2::Digest;
 use serde_json::json;
 use serde_json::to_string_pretty;
 use size_display::Size;
@@ -11,15 +9,11 @@ use std::env;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::thread::JoinHandle;
 
 use crate::archive;
+use crate::archive_transport;
 use crate::chunkers::*;
-use crate::client;
 use crate::content_sensitive_splitter::*;
-use crate::handshake::HandShake;
-use crate::hash::*;
 use crate::iovec::*;
 use crate::output::Output;
 use crate::paths::*;
@@ -34,14 +28,6 @@ use crate::stream_orderer::*;
 use crate::thin_metadata::*;
 
 //-----------------------------------------
-enum Tp {
-    Local(archive::Data),
-    Remote(
-        Arc<Mutex<client::ClientRequests>>,
-        Option<JoinHandle<std::result::Result<(), anyhow::Error>>>,
-    ),
-}
-
 struct DedupHandler {
     nr_chunks: usize,
     stream_buf: Vec<u8>,
@@ -49,8 +35,7 @@ struct DedupHandler {
     mapping_builder: Arc<Mutex<dyn Builder>>,
     pub stats: stream_meta::StreamStats,
     so: StreamOrder,
-    transport: Tp,
-    iov_hasher: Blake2b256,
+    archive: Box<dyn archive_transport::Transport>,
 }
 
 impl DedupHandler {
@@ -63,24 +48,10 @@ impl DedupHandler {
         matches: &ArgMatches,
     ) -> Result<Self> {
         let so = StreamOrder::new();
-        let mut sending = false;
-
-        let tp: Tp = if let Some(s_conn) = server_addr {
-            sending = true;
-            println!("Client is connecting to server using {}", s_conn);
-            let mut client = client::Client::new(s_conn, so.clone())?;
-            let rq = client.get_request_queue();
-            // Start a thread to handle client communication
-            let h = thread::Builder::new()
-                .name("client socket handler".to_string())
-                .spawn(move || client.run())?;
-            Tp::Remote(rq, Some(h))
-        } else {
-            Tp::Local(archive::Data::new(None, matches)?)
-        };
+        let tp = archive_transport::create_archive_transport(server_addr, so.clone(), matches)?;
 
         // Create the stream meta and store
-        let stream_meta = stream_meta::StreamMeta::new(names, thin_id, sending)?;
+        let stream_meta = stream_meta::StreamMeta::new(names, thin_id, tp.remote())?;
 
         Ok(Self {
             nr_chunks: 0,
@@ -89,16 +60,8 @@ impl DedupHandler {
             mapping_builder,
             stats,
             so,
-            transport: tp,
-            iov_hasher: Blake2b256::new(),
+            archive: tp,
         })
-    }
-
-    fn hash_256_iov(&mut self, iov: &IoVec) -> Hash256 {
-        for v in iov {
-            self.iov_hasher.update(&v[..]);
-        }
-        self.iov_hasher.finalize_reset()
     }
 
     fn process_stream_entry(&mut self, e: &MapEntry, len: u64) -> Result<()> {
@@ -128,10 +91,6 @@ impl DedupHandler {
             archive::SLAB_SIZE_TARGET,
         )?;
         Ok(())
-    }
-
-    fn get_next_stream_id(&self) -> u64 {
-        self.so.entry_start()
     }
 
     fn enqueue_entry(&mut self, e: MapEntry, len: u64) -> Result<()> {
@@ -171,31 +130,7 @@ impl IoVecHandler for DedupHandler {
                 len,
             )?;
         } else {
-            let h = self.hash_256_iov(iov);
-            match self.transport {
-                Tp::Local(ref mut da) => {
-                    let ((slab, offset), len_written) = da.data_add(h, iov, len)?;
-                    self.enqueue_entry(
-                        MapEntry::Data {
-                            slab,
-                            offset,
-                            nr_entries: 1,
-                        },
-                        len,
-                    )?;
-                    self.stats.written += len_written;
-                }
-                Tp::Remote(ref rq, _) => {
-                    let data = client::Data {
-                        id: self.get_next_stream_id(),
-                        t: client::IdType::Pack(hash256_to_bytes(&h), len),
-                        data: Some(io_vec_to_vec(iov)),
-                        entry: None,
-                    };
-                    let mut req = rq.lock().unwrap();
-                    req.handle_data(data);
-                }
-            }
+            self.stats.written += self.archive.pack(&mut self.so, iov, len)?;
         }
 
         self.process_stream(false)?;
@@ -207,7 +142,6 @@ impl IoVecHandler for DedupHandler {
         // We need to process everything that is outstanding which could be
         // quite a bit
         // TODO: Make this handle errors, like if we end up hanging forever
-        let h: HandShake;
         loop {
             if self.process_stream(true)? {
                 break;
@@ -223,40 +157,8 @@ impl IoVecHandler for DedupHandler {
 
         // The stream file is done, lets put the file in the correct place which could be the
         // correct local archive directory or remote archive directory.
-
-        match self.transport {
-            Tp::Local(ref _db) => {
-                self.stream_meta.complete(&mut self.stats)?;
-            }
-            Tp::Remote(ref mut rq, ref mut handle) => {
-                // Send the stream file to the server and wait for it to complete
-                {
-                    let mut req = rq.lock().unwrap();
-                    self.stats.written = req.data_written;
-                    self.stats.hashes_written = req.hashes_written;
-
-                    // Send the stream metadata & stream itself to the server side
-                    let to_send = self.stream_meta.package(&mut self.stats)?;
-                    let cmd = client::SyncCommand::new(client::Command::Cmd(Box::new(to_send)));
-                    h = cmd.h.clone();
-                    req.handle_control(cmd);
-                }
-
-                // You need to make sure we are not holding a lock when we call wait,
-                // this is achieved by using different scopes.
-                h.wait();
-
-                client::client_thread_end(rq);
-
-                if let Some(worker) = handle.take() {
-                    let rc = worker.join();
-                    if rc.is_err() {
-                        println!("client worker thread ended with {:?}", rc);
-                    }
-                }
-            }
-        }
-
+        self.archive
+            .complete(&mut self.stream_meta, &mut self.stats)?;
         Ok(())
     }
 }
@@ -335,9 +237,9 @@ impl Packer {
 
         splitter.complete(&mut handler)?;
         self.output.report.progress(100);
-        //let (flush_data_written, flush_hashes_written) = handler.archive.flush()?;
-        //handler.stats.written += flush_data_written;
-        //handler.stats.hashes_written += flush_hashes_written;
+
+        handler.archive.flush()?;
+
         let end_time: DateTime<Utc> = Utc::now();
         let elapsed = end_time - start_time;
         let elapsed = elapsed.num_milliseconds() as f64 / 1000.0;

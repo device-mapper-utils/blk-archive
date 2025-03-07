@@ -69,7 +69,12 @@ impl Unpacker {
         let da = if remote.is_some() {
             None
         } else {
-            Some(archive::Data::new(Some(cache_nr_entries), matches)?)
+            Some(archive::Data::new(
+                Some(cache_nr_entries),
+                None,
+                None,
+                matches,
+            )?)
         };
 
         Ok(Self {

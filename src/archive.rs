@@ -47,7 +47,12 @@ pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: u64) -> 
 }
 
 impl Data {
-    pub fn new(cache_entries: Option<u64>, matches: &ArgMatches) -> Result<Self> {
+    pub fn new(
+        cache_entries: Option<u64>,
+        data_file: Option<SlabFile>,
+        hashes_file: Option<Arc<Mutex<SlabFile>>>,
+        matches: &ArgMatches,
+    ) -> Result<Self> {
         let seen = CuckooFilter::read(paths::index_path())?;
 
         let config = read_config(".", matches)?;
@@ -64,21 +69,23 @@ impl Data {
         let hashes = lru::LruCache::new(NonZeroUsize::new(slab_capacity as usize).unwrap());
         let slabs = lru::LruCache::new(NonZeroUsize::new(slab_capacity as usize).unwrap());
 
-        let data_file = SlabFileBuilder::open(paths::data_path())
-            .write(true)
-            .queue_depth(128)
-            .build()
-            .context("couldn't open data slab file")?;
+        let data_file = data_file.unwrap_or(
+            SlabFileBuilder::open(paths::data_path())
+                .write(true)
+                .queue_depth(128)
+                .build()
+                .context("couldn't open data slab file")?,
+        );
 
         let nr_slabs = data_file.get_nr_slabs() as u32;
 
-        let hashes_file = Arc::new(Mutex::new(
+        let hashes_file = hashes_file.unwrap_or(Arc::new(Mutex::new(
             SlabFileBuilder::open(paths::hashes_path())
                 .write(true)
                 .queue_depth(16)
                 .build()
                 .context("couldn't open hashes slab file")?,
-        ));
+        )));
 
         {
             let hashes_file = hashes_file.lock().unwrap();
