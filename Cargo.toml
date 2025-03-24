@@ -23,6 +23,7 @@ lru = "0.12.5"
 nix = {version = "0.29.0", features = ["signal", "ioctl"] }
 nom = "7.1"
 num_enum = "0.7.3"
+parking_lot = "0.12"
 rand = "0.8"
 rand_chacha = "0.3"
 roaring = "0.10.10"

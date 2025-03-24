@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::ArgMatches;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -114,7 +115,7 @@ impl Transport for RemoteArchive {
             data: Some(io_vec_to_vec(iov)),
             entry: None,
         };
-        let mut req = self.client.lock().unwrap();
+        let mut req = self.client.lock();
         req.handle_data(data);
         Ok(0)
     }
@@ -127,7 +128,7 @@ impl Transport for RemoteArchive {
         let h: HandShake;
         // Send the stream file to the server and wait for it to complete
         {
-            let mut req = self.client.lock().unwrap();
+            let mut req = self.client.lock();
             stats.written = req.data_written;
 
             // Send the stream metadata & stream itself to the server side

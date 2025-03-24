@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::prelude::*;
 use clap::ArgMatches;
+use parking_lot::Mutex;
 use serde_json::json;
 use serde_json::to_string_pretty;
 use size_display::Size;
@@ -8,7 +9,7 @@ use std::boxed::Box;
 use std::env;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::archive;
 use crate::archive_transport;
@@ -65,7 +66,7 @@ impl DedupHandler {
     }
 
     fn process_stream_entry(&mut self, e: &MapEntry, len: u64) -> Result<()> {
-        let mut builder = self.mapping_builder.lock().unwrap();
+        let mut builder = self.mapping_builder.lock();
         builder.next(e, len, &mut self.stream_buf)
     }
 
@@ -148,7 +149,7 @@ impl IoVecHandler for DedupHandler {
             }
         }
 
-        let mut builder = self.mapping_builder.lock().unwrap();
+        let mut builder = self.mapping_builder.lock();
         builder.complete(&mut self.stream_buf)?;
         drop(builder);
 

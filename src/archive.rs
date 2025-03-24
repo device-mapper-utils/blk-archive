@@ -8,9 +8,10 @@ use crate::iovec::*;
 use crate::paths;
 use crate::slab::*;
 use clap::ArgMatches;
+use parking_lot::Mutex;
 use std::io::Write;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub const SLAB_SIZE_TARGET: u64 = 4 * 1024 * 1024;
 
@@ -88,7 +89,7 @@ impl Data {
         )));
 
         {
-            let hashes_file = hashes_file.lock().unwrap();
+            let hashes_file = hashes_file.lock();
             assert_eq!(data_file.get_nr_slabs(), hashes_file.get_nr_slabs());
         }
 
@@ -113,7 +114,7 @@ impl Data {
 
     fn get_info(&mut self, slab: u32) -> Result<&ByIndex> {
         self.slabs.try_get_or_insert(slab, || {
-            let mut hf = self.hashes_file.lock().unwrap();
+            let mut hf = self.hashes_file.lock();
             let hashes = hf.read(slab)?;
             ByIndex::new(hashes)
         })
@@ -133,7 +134,7 @@ impl Data {
         assert!(slab != self.current_slab);
 
         self.hashes.try_get_or_insert(slab, || {
-            let mut hashes_file = self.hashes_file.lock().unwrap();
+            let mut hashes_file = self.hashes_file.lock();
             let buf = hashes_file.read(slab)?;
             ByHash::new(buf)
         })
@@ -145,7 +146,7 @@ impl Data {
             let mut resize_needed = false;
 
             // Lock the hashes file and iterate through slabs.
-            let mut hashes_file = self.hashes_file.lock().unwrap();
+            let mut hashes_file = self.hashes_file.lock();
             for s in 0..hashes_file.get_nr_slabs() {
                 let buf = hashes_file.read(s as u32)?;
                 let hi = ByHash::new(buf)?;
@@ -181,7 +182,7 @@ impl Data {
             let index = ByHash::new(buffer)?;
             self.hashes.put(self.current_slab, index);
 
-            let mut hashes_file = self.hashes_file.lock().unwrap();
+            let mut hashes_file = self.hashes_file.lock();
             complete_slab_(&mut hashes_file, &mut self.hashes_buf)?;
             self.current_slab += 1;
             self.current_entries = 0;
@@ -296,7 +297,7 @@ impl Data {
     fn sync_and_close(&mut self) {
         self.complete_data_slab()
             .expect("Data.drop: complete_data_slab error!");
-        let mut hashes_file = self.hashes_file.lock().unwrap();
+        let mut hashes_file = self.hashes_file.lock();
         hashes_file
             .close()
             .expect("Data.drop: hashes_file.close() error!");

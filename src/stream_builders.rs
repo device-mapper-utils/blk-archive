@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::hash_index::*;
 use crate::slab::*;
@@ -184,7 +185,7 @@ impl DeltaBuilder {
     }
 
     fn get_index_(&mut self, slab: u32) -> Result<Arc<ByIndex>> {
-        let mut hashes_file = self.hashes_file.lock().unwrap();
+        let mut hashes_file = self.hashes_file.lock();
         let hashes = hashes_file.read(slab)?;
         Ok(Arc::new(ByIndex::new(hashes)?))
     }

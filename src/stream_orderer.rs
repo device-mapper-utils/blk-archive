@@ -1,5 +1,6 @@
+use parking_lot::{Condvar, Mutex};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 
 use crate::stream::MapEntry;
 
@@ -59,7 +60,7 @@ impl StreamOrder {
 
     pub fn entry_add(&self, e: MapEntry, len: Option<u64>, data: Option<Vec<u8>>) {
         let (protected, cvar) = &*self.pair;
-        let mut p = protected.lock().unwrap();
+        let mut p = protected.lock();
         let next = Self::_next(&mut p);
         p.ready.insert(next, Sentry { e, len, data });
         cvar.notify_all();
@@ -68,13 +69,13 @@ impl StreamOrder {
     pub fn entry_start(&self) -> u64 {
         let (protected, _cvar) = &*self.pair;
 
-        let mut p = protected.lock().unwrap();
+        let mut p = protected.lock();
         Self::_next(&mut p)
     }
 
     pub fn entry_complete(&self, id: u64, e: MapEntry, len: Option<u64>, data: Option<Vec<u8>>) {
         let (protected, cvar) = &*self.pair;
-        let mut p = protected.lock().unwrap();
+        let mut p = protected.lock();
         p.ready.insert(id, Sentry { e, len, data });
         cvar.notify_all();
     }
@@ -91,13 +92,13 @@ impl StreamOrder {
 
     pub fn drain(&mut self, wait: bool) -> (Vec<Sentry>, bool) {
         let (protected, cvar) = &*self.pair;
-        let mut p = protected.lock().unwrap();
+        let mut p = protected.lock();
 
         if wait {
             while p.ready.is_empty() {
                 // Before we place ourselves to sleep, make sure we aren't done!
                 if !Self::_complete(&p) {
-                    p = cvar.wait(p).unwrap();
+                    cvar.wait(&mut p);
                 } else {
                     break;
                 }
@@ -113,7 +114,7 @@ impl StreamOrder {
 
     pub fn is_complete(&self) -> bool {
         let (protected, _cvar) = &*self.pair;
-        let p = protected.lock().unwrap();
+        let p = protected.lock();
         Self::_complete(&p)
     }
 }

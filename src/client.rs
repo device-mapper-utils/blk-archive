@@ -1,9 +1,10 @@
 use anyhow::Result;
+use parking_lot::Mutex;
 use rkyv::{rancor::Error, Archive, Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::process;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use crate::cuckoo_filter;
@@ -146,7 +147,7 @@ pub const END: Data = Data {
 };
 
 pub fn client_thread_end(client_req: &Mutex<ClientRequests>) {
-    let mut rq = client_req.lock().unwrap();
+    let mut rq = client_req.lock();
     rq.handle_data(END);
 }
 
@@ -166,12 +167,12 @@ impl Client {
     }
 
     fn remove_data_req(&mut self) -> Option<Data> {
-        let mut req = self.req_q.lock().unwrap();
+        let mut req = self.req_q.lock();
         req.remove()
     }
 
     fn remove_control_req(&mut self) -> Option<SyncCommand> {
-        let mut req = self.req_q.lock().unwrap();
+        let mut req = self.req_q.lock();
         req.remove_control()
     }
 
@@ -361,7 +362,7 @@ impl Client {
                 }
                 wire::Rpc::PackResp(id, p) => {
                     {
-                        let mut rq = self.req_q.lock().unwrap();
+                        let mut rq = self.req_q.lock();
                         rq.data_written += p.data_written;
                     }
 
@@ -529,6 +530,7 @@ impl Client {
             if rc == wire::IOResult::Exit {
                 break;
             } else if rc == wire::IOResult::WriteWouldBlock {
+                //eprintln!("Enabling POLL out!");
                 Client::_enable_poll_out(event_fd, fd, &mut poll_out)?;
             }
         }
@@ -540,7 +542,7 @@ impl Client {
 
         {
             // Indicate that we don't have anything servicing the request queue.
-            let mut req = self.req_q.lock().unwrap();
+            let mut req = self.req_q.lock();
             req.dead_thread = true;
         }
 
@@ -562,7 +564,7 @@ pub fn rpc_invoke(rq: &Mutex<ClientRequests>, rpc: wire::Rpc) -> Result<Option<w
     {
         let cmd = SyncCommand::new(Command::Cmd(Box::new(rpc)));
         h = cmd.h.clone();
-        let mut req = rq.lock().unwrap();
+        let mut req = rq.lock();
         req.handle_control(cmd);
     }
 

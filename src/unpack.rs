@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::prelude::*;
 use clap::ArgMatches;
 use io::{Read, Seek, Write};
+use parking_lot::Mutex;
 use serde_json::json;
 use serde_json::to_string_pretty;
 use size_display::Size;
@@ -11,7 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use tempfile::TempDir;
@@ -188,7 +189,7 @@ impl Unpacker {
                 }
 
                 {
-                    let rq = remote.rq.lock().unwrap();
+                    let rq = remote.rq.lock();
                     if rq.dead_thread {
                         socket_thread_alive = false;
                         break;
@@ -307,7 +308,7 @@ fn build_entries(
                         data: None,
                         entry: Some(*e),
                     };
-                    let mut rq = rq.lock().unwrap();
+                    let mut rq = rq.lock();
                     rq.handle_data(data);
                 }
                 Partial {
@@ -335,7 +336,7 @@ fn build_entries(
                         data: None,
                         entry: Some(*e),
                     };
-                    let mut rq = rq.lock().unwrap();
+                    let mut rq = rq.lock();
                     rq.handle_data(data);
                 }
                 _ => so.entry_add(*e, None, None),

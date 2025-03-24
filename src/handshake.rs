@@ -1,4 +1,5 @@
-use std::sync::{Arc, Condvar, Mutex};
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 
 use crate::wire;
 
@@ -31,7 +32,7 @@ impl HandShake {
 
     pub fn done(&self, rpc: Option<wire::Rpc>) {
         let (lock, cvar) = &*self.pair;
-        let mut started = lock.lock().unwrap();
+        let mut started = lock.lock();
         started.done = true;
         started.contents = rpc;
         cvar.notify_all();
@@ -39,10 +40,10 @@ impl HandShake {
 
     pub fn wait(&self) -> Option<wire::Rpc> {
         let (lock, cvar) = &*self.pair;
-        let mut started = lock.lock().unwrap();
+        let mut started = lock.lock();
 
         while !started.done {
-            started = cvar.wait(started).unwrap();
+            cvar.wait(&mut started);
         }
         started.contents.take()
     }
