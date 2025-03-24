@@ -289,6 +289,10 @@ impl Data {
         self.complete_data_slab()
     }
 
+    pub fn get_seen(&mut self) -> CuckooFilterSerialized {
+        self.seen.to_rpc()
+    }
+
     fn sync_and_close(&mut self) {
         self.complete_data_slab()
             .expect("Data.drop: complete_data_slab error!");

@@ -315,6 +315,22 @@ impl Server {
                         )? {
                             rc = wire::IOResult::WriteWouldBlock;
                         }
+                    } else {
+                        panic!(
+                            "expecting RetrieveChunkReq client::IdType::Unpack, got {:?}",
+                            op_type
+                        );
+                    }
+                }
+                wire::Rpc::CuckooFilterReq => {
+                    let filter = self.da.get_seen();
+                    if wire::write_request(
+                        &mut c.c,
+                        &wire::Rpc::CuckooFilterResp(Box::new(filter)),
+                        wire::WriteChunk::None,
+                        &mut c.w,
+                    )? {
+                        rc = wire::IOResult::WriteWouldBlock;
                     }
                 }
                 _ => {

@@ -251,7 +251,6 @@ mod splitter_tests {
     impl<W: Write> IoVecHandler for CatHandler<'_, W> {
         fn handle_data(&mut self, iov: &IoVec) -> Result<()> {
             for v in iov {
-                println!("{:?}", v);
                 self.output.write_all(v)?;
             }
 

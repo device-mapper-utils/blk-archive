@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::client;
 use crate::config;
+use crate::cuckoo_filter;
 use crate::ipc::*;
 use crate::stream_meta;
 
@@ -121,6 +122,9 @@ pub enum Rpc {
 
     ArchiveListReq(u64),
     ArchiveListResp(u64, Vec<ArchiveEntry>), // This may not scale well enough
+
+    CuckooFilterReq,
+    CuckooFilterResp(Box<cuckoo_filter::CuckooFilterSerialized>),
 }
 
 pub fn id_get(rpc: &Rpc) -> u64 {

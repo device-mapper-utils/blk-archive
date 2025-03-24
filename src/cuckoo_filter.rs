@@ -11,11 +11,19 @@ use std::path::Path;
 
 use crate::slab::builder::*;
 use crate::utils::is_pow2;
+use rkyv::{Archive, Deserialize, Serialize};
 
 const ENTRIES_PER_BUCKET: usize = 4;
 const MAX_KICKS: usize = 500;
 
-#[derive(Clone)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
+#[rkyv(
+    // This will generate a PartialEq impl between our unarchived
+    // and archived types
+    compare(PartialEq),
+    // Derives can be passed through to the generated type:
+    derive(Debug),
+)]
 struct Bucket {
     entries: [u16; ENTRIES_PER_BUCKET],
     slabs: [u32; ENTRIES_PER_BUCKET],
@@ -34,6 +42,22 @@ impl Default for Bucket {
 pub enum InsertResult {
     PossiblyPresent(u32),
     Inserted,
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
+#[rkyv(
+    // This will generate a PartialEq impl between our unarchived
+    // and archived types
+    compare(PartialEq),
+    // Derives can be passed through to the generated type:
+    derive(Debug),
+)]
+pub struct CuckooFilterSerialized {
+    len: u64,
+    scatter: Vec<u64>,
+    bucket_counts: Vec<u8>,
+    buckets: Vec<Bucket>,
+    mask: u64,
 }
 
 pub struct CuckooFilter {
@@ -94,6 +118,16 @@ pub fn calculate_signature(values: &[usize]) -> u64 {
     u64::from_le_bytes(hasher.finalize().into())
 }
 
+fn convert_vec_u64_to_usize(vec: Vec<u64>) -> Vec<usize> {
+    vec.into_iter()
+        .map(|x| x.try_into().expect("Value too large for usize"))
+        .collect()
+}
+
+fn convert_vec_usize_to_u64(vec: &[usize]) -> Vec<u64> {
+    vec.iter().map(|x| *x as u64).collect()
+}
+
 impl CuckooFilter {
     fn make_scatter(rng: &mut ChaCha20Rng) -> Vec<usize> {
         let scatter: Vec<usize> = repeat_with(|| rng.gen())
@@ -106,6 +140,37 @@ impl CuckooFilter {
         assert!(4224213928824907068 == calculate_signature(scatter.as_slice()));
 
         scatter
+    }
+
+    pub fn from_rpc(x: CuckooFilterSerialized) -> Self {
+        let rng = ChaCha20Rng::seed_from_u64(1);
+        Self {
+            rng,
+            len: x
+                .len
+                .try_into()
+                .expect("expected serialized len value <= usize"),
+            scatter: convert_vec_u64_to_usize(x.scatter),
+            bucket_counts: x.bucket_counts,
+            buckets: x.buckets,
+            mask: x
+                .mask
+                .try_into()
+                .expect("expected serialized mask value <= usize"),
+        }
+    }
+
+    pub fn to_rpc(&self) -> CuckooFilterSerialized {
+        CuckooFilterSerialized {
+            len: self.len as u64,
+            scatter: convert_vec_usize_to_u64(&self.scatter),
+            bucket_counts: self.bucket_counts.clone(),
+            buckets: self.buckets.clone(),
+            mask: self
+                .mask
+                .try_into()
+                .expect("expected to serialize mask value"),
+        }
     }
 
     pub fn with_capacity(mut n: usize) -> Self {

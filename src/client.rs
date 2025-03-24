@@ -6,8 +6,10 @@ use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::cuckoo_filter;
 use crate::handshake;
 use crate::handshake::HandShake;
+use crate::hash;
 use crate::ipc;
 use crate::ipc::*;
 use crate::stream::*;
@@ -20,6 +22,8 @@ pub struct Client {
     cmds_inflight: HashMap<u64, HandShake>,
     so: StreamOrder,
     req_q: Arc<Mutex<ClientRequests>>,
+    cuckoo: Option<cuckoo_filter::CuckooFilter>,
+    cuckoo_req_outstanding: bool,
 }
 
 pub struct ClientRequests {
@@ -86,6 +90,7 @@ pub struct Data {
     pub entry: Option<MapEntry>,
 }
 
+#[derive(Debug)]
 pub enum Command {
     Cmd(Box<wire::Rpc>),
     Exit,
@@ -155,7 +160,29 @@ impl Client {
             cmds_inflight: HashMap::new(),
             so,
             req_q: Arc::new(Mutex::new(ClientRequests::new()?)),
+            cuckoo: None,
+            cuckoo_req_outstanding: false,
         })
+    }
+
+    fn remove_data_req(&mut self) -> Option<Data> {
+        let mut req = self.req_q.lock().unwrap();
+        req.remove()
+    }
+
+    fn remove_control_req(&mut self) -> Option<SyncCommand> {
+        let mut req = self.req_q.lock().unwrap();
+        req.remove_control()
+    }
+
+    fn request_cuckoo(&mut self, w_b: &mut wire::OutstandingWrites) -> Result<wire::IOResult> {
+        self.cuckoo_req_outstanding = true;
+        let mut rc = wire::IOResult::Ok;
+        let rpc = wire::Rpc::CuckooFilterReq;
+        if wire::write_request(&mut self.s, &rpc, wire::WriteChunk::None, w_b)? {
+            rc = wire::IOResult::WriteWouldBlock;
+        }
+        Ok(rc)
     }
 
     fn process_request_queue(
@@ -164,24 +191,57 @@ impl Client {
     ) -> Result<wire::IOResult> {
         // Empty the request queue and send as one packet!
         let mut rc = wire::IOResult::Ok;
-        let mut req = self.req_q.lock().unwrap();
         let mut pack_entries = Vec::new();
         let mut should_exit = false;
-        while let Some(e) = req.remove() {
+
+        while let Some(mut e) = self.remove_data_req() {
             if e.id == u64::MAX {
                 should_exit = true;
                 rc = wire::IOResult::Exit;
             } else {
                 // We need to
                 let t = &e.t;
+                let id = e.id;
                 match t {
                     IdType::Pack(hash, _len) => {
-                        let id = e.id;
-                        pack_entries.push(wire::DataReq { id, hash: *hash });
+                        // check to see if we have a local replicated cuckoo filter, so that we
+                        // can tell without making a round trip that we need to send the data.
+                        if let Some(cf) = &mut self.cuckoo {
+                            let mh = hash::hash_le_u64(hash);
+                            if let Ok(test_result) = cf.test(mh) {
+                                if test_result == cuckoo_filter::InsertResult::Inserted {
+                                    // Definitely not present, so lets simply send the data
+                                    let d = e.data.take().expect("no data on a pack!");
+                                    let pack_req = wire::Rpc::PackReq(id, *hash);
+                                    if wire::write_request(
+                                        &mut self.s,
+                                        &pack_req,
+                                        wire::WriteChunk::Data(d),
+                                        w_b,
+                                    )? {
+                                        rc = wire::IOResult::WriteWouldBlock;
+                                    }
+                                } else {
+                                    // May already be present, lets check
+                                    pack_entries.push(wire::DataReq { id, hash: *hash });
+                                }
+                            }
+                        } else {
+                            if !self.cuckoo_req_outstanding {
+                                let request_result = self.request_cuckoo(w_b)?;
+                                if request_result != wire::IOResult::Ok {
+                                    rc = request_result;
+                                }
+                            }
+
+                            pack_entries.push(wire::DataReq { id, hash: *hash });
+                        }
                         self.data_inflight.insert(id, e);
+                        if rc == wire::IOResult::WriteWouldBlock {
+                            break;
+                        }
                     }
                     IdType::Unpack(_s) => {
-                        let id = e.id;
                         let t = e.t.clone();
                         self.data_inflight.insert(e.id, e);
                         let rpc_request = wire::Rpc::RetrieveChunkReq(id, t);
@@ -191,7 +251,7 @@ impl Client {
                             wire::WriteChunk::None,
                             w_b,
                         )? {
-                            rc = wire::IOResult::WriteWouldBlock;
+                            return Ok(wire::IOResult::WriteWouldBlock);
                         }
                     }
                 }
@@ -208,7 +268,7 @@ impl Client {
             }
         }
 
-        while let Some(e) = req.remove_control() {
+        if let Some(e) = self.remove_control_req() {
             match e.c {
                 Command::Cmd(rpc) => {
                     self.cmds_inflight.insert(wire::id_get(&rpc), e.h.clone());
@@ -221,6 +281,11 @@ impl Client {
                     e.h.done(None);
                 }
             }
+        }
+
+        if should_exit {
+            // Are we OK if rc == WriteWouldBlock???
+            rc = wire::IOResult::Exit;
         }
 
         Ok(rc)
@@ -307,8 +372,24 @@ impl Client {
                     };
                     let removed = self.data_inflight.remove(&id).unwrap();
 
-                    if let IdType::Pack(_hash, len) = removed.t {
+                    if let IdType::Pack(hash, len) = removed.t {
+                        // If we have a local cuckoo filter, update it
+                        if let Some(cf) = &mut self.cuckoo {
+                            if p.data_written > 0 {
+                                let ts_result = cf.test_and_set(hash::hash_le_u64(&hash), p.slab);
+                                if ts_result.is_err() {
+                                    self.cuckoo.take();
+                                    let request_result = self.request_cuckoo(w)?;
+                                    if request_result != wire::IOResult::Ok {
+                                        rc = request_result;
+                                    }
+                                }
+                            }
+                        }
+
                         self.so.entry_complete(id, e, Some(len), None);
+                    } else {
+                        panic!("we're expecting IdType::Pack, got {:?}", removed.t);
                     }
                 }
                 wire::Rpc::StreamSendComplete(id) => {
@@ -339,12 +420,16 @@ impl Client {
                         .unwrap()
                         .done(Some(wire::Rpc::StreamConfigResp(id, config)));
                 }
+                wire::Rpc::CuckooFilterResp(filter) => {
+                    self.cuckoo = Some(cuckoo_filter::CuckooFilter::from_rpc(*filter));
+                    self.cuckoo_req_outstanding = false;
+                }
                 wire::Rpc::Error(_id, msg) => {
                     eprintln!("Unexpected error, server reported: {}", msg);
                     process::exit(2);
                 }
                 _ => {
-                    eprint!("What are we not handling! {:?}", d);
+                    panic!("What are we not handling! {:?}", d);
                 }
             }
             r.rezero();
