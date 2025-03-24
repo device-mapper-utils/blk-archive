@@ -11,6 +11,7 @@ use nix::sys::signalfd::{SfdFlags, SignalFd};
 use rkyv::rancor::Error;
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +25,58 @@ use crate::ipc::*;
 use crate::list::streams_get;
 use crate::stream_meta;
 
+#[derive(Debug, Default)]
+struct ServerStats {
+    have_data_req: u64,
+    have_data_req_found: u64,
+    have_data_req_missing: u64,
+    pack_req: u64,
+    stream_send: u64,
+    archive_list_req: u64,
+    archive_config: u64,
+    stream_config: u64,
+    stream_retrieve: u64,
+    retrieve_chunk_req: u64,
+    cuckoo_filter_req: u64,
+}
+
+impl ServerStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl fmt::Display for ServerStats {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "ServerStats:\n\
+            have_data_req: {}\n\
+            have_data_req_found: {}\n\
+            have_data_req_missing: {}\n\
+            pack_req: {}\n\
+            stream_send: {}\n\
+            archive_list_req: {}\n\
+            archive_config: {}\n\
+            stream_config: {}\n\
+            stream_retrieve: {}\n\
+            retrieve_chunk_req: {}\n\
+            cuckoo_filter_req: {}",
+            self.have_data_req,
+            self.have_data_req_found,
+            self.have_data_req_missing,
+            self.pack_req,
+            self.stream_send,
+            self.archive_list_req,
+            self.archive_config,
+            self.stream_config,
+            self.stream_retrieve,
+            self.retrieve_chunk_req,
+            self.cuckoo_filter_req
+        )
+    }
+}
+
 pub struct Server {
     da: Data,
     listener: Box<dyn ipc::Listening>,
@@ -31,6 +84,7 @@ pub struct Server {
     pub exit: Arc<AtomicBool>,
     _ipc_dir: Option<TempDir>,
     matches: ArgMatches,
+    stats: ServerStats,
 }
 
 struct Client<'a> {
@@ -96,6 +150,7 @@ impl Server {
                 exit: Arc::new(AtomicBool::new(false)),
                 _ipc_dir: ipc_dir,
                 matches,
+                stats: ServerStats::new(),
             },
             c_path,
         ))
@@ -119,9 +174,11 @@ impl Server {
             let d = rkyv::deserialize::<wire::Rpc, Error>(r).unwrap();
             match d {
                 wire::Rpc::HaveDataReq(data_req) => {
+                    self.stats.have_data_req += 1;
                     for i in data_req {
                         let hash256 = bytes_to_hash256(&i.hash);
                         if let Some(location) = self.da.is_known(hash256)? {
+                            self.stats.have_data_req_found += 1;
                             // We know about this one
                             let l = wire::DataRespYes {
                                 id: i.id,
@@ -131,11 +188,13 @@ impl Server {
                             found_it.push(l);
                         } else {
                             // We need to add the data
+                            self.stats.have_data_req_missing += 1;
                             data_needed.push(i.id);
                         }
                     }
                 }
                 wire::Rpc::PackReq(id, hash) => {
+                    self.stats.pack_req += 1;
                     let mut iov = IoVec::new();
                     let hash256 = bytes_to_hash256(&hash);
                     iov.push(&c.bm.buff[c.bm.data_start..c.bm.data_end]);
@@ -157,6 +216,7 @@ impl Server {
                     }
                 }
                 wire::Rpc::StreamSend(id, sm, stream_files_bytes) => {
+                    self.stats.stream_send += 1;
                     let packed_path = sm.source_path.clone();
                     let sf = wire::bytes_to_stream_files(&stream_files_bytes);
                     let write_rc =
@@ -191,6 +251,7 @@ impl Server {
                     }
                 }
                 wire::Rpc::ArchiveListReq(id) => {
+                    self.stats.archive_list_req += 1;
                     let streams = streams_get(&PathBuf::from("./streams"));
                     match streams {
                         Ok(streams) => {
@@ -217,6 +278,7 @@ impl Server {
                     }
                 }
                 wire::Rpc::ArchiveConfig(id) => {
+                    self.stats.archive_config += 1;
                     let config = config::read_config(".", &self.matches);
                     match config {
                         Ok(config) => {
@@ -244,6 +306,7 @@ impl Server {
                     }
                 }
                 wire::Rpc::StreamConfig(id, stream_id) => {
+                    self.stats.stream_config += 1;
                     // Read up the stream config
                     let stream_config = stream_meta::read_stream_config(&stream_id);
 
@@ -273,6 +336,7 @@ impl Server {
                     }
                 }
                 wire::Rpc::StreamRetrieve(id, stream_id) => {
+                    self.stats.stream_retrieve += 1;
                     let stream_files = stream_meta::stream_id_to_stream_files(&stream_id);
 
                     if let Err(e) = stream_files {
@@ -300,6 +364,7 @@ impl Server {
                     }
                 }
                 wire::Rpc::RetrieveChunkReq(id, op_type) => {
+                    self.stats.retrieve_chunk_req += 1;
                     if let client::IdType::Unpack(s) = op_type {
                         let p = s.partial.map(|partial| (partial.begin, partial.end));
 
@@ -323,6 +388,7 @@ impl Server {
                     }
                 }
                 wire::Rpc::CuckooFilterReq => {
+                    self.stats.cuckoo_filter_req += 1;
                     let filter = self.da.get_seen();
                     if wire::write_request(
                         &mut c.c,
@@ -486,6 +552,7 @@ impl Server {
             }
 
             if end {
+                println!("{}", self.stats);
                 break;
             }
 
