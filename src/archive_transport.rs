@@ -36,7 +36,7 @@ struct LocalArchive {
 }
 
 struct RemoteArchive {
-    client: Arc<Mutex<client::ClientRequests>>,
+    client: Arc<client::ClientRequests>,
     join_handle: Option<JoinHandle<std::result::Result<(), anyhow::Error>>>,
 }
 
@@ -115,8 +115,7 @@ impl Transport for RemoteArchive {
             data: Some(io_vec_to_vec(iov)),
             entry: None,
         };
-        let mut req = self.client.lock();
-        req.handle_data(data);
+        self.client.handle_data(data);
         Ok(0)
     }
 
@@ -128,14 +127,12 @@ impl Transport for RemoteArchive {
         let h: HandShake;
         // Send the stream file to the server and wait for it to complete
         {
-            let mut req = self.client.lock();
-            stats.written = req.data_written;
-
+            stats.written = self.client.current_counts();
             // Send the stream metadata & stream itself to the server side
             let to_send = sm.package(stats)?;
             let cmd = client::SyncCommand::new(client::Command::Cmd(Box::new(to_send)));
             h = cmd.h.clone();
-            req.handle_control(cmd);
+            self.client.handle_control(cmd);
         }
 
         // You need to make sure we are not holding a lock when we call wait,

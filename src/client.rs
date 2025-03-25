@@ -1,5 +1,5 @@
 use anyhow::Result;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use rkyv::{rancor::Error, Archive, Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -22,17 +22,9 @@ pub struct Client {
     data_inflight: HashMap<u64, Data>, // Data items waiting to complete
     cmds_inflight: HashMap<u64, HandShake>,
     so: StreamOrder,
-    req_q: Arc<Mutex<ClientRequests>>,
+    req_q: Arc<ClientRequests>,
     cuckoo: Option<cuckoo_filter::CuckooFilter>,
     cuckoo_req_outstanding: bool,
-}
-
-pub struct ClientRequests {
-    data: VecDeque<Data>,
-    control: VecDeque<SyncCommand>,
-    pub dead_thread: bool,
-    pub data_written: u64,
-    pub hashes_written: u64,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
@@ -111,31 +103,106 @@ impl SyncCommand {
     }
 }
 
+const HIGH_WATER_START: u64 = 1024 * 1024 * 5;
+
+pub struct ClientRequests {
+    inner: Mutex<Inner>,
+    condvar: Condvar,
+}
+
+struct Inner {
+    data: VecDeque<Data>,
+    control: VecDeque<SyncCommand>,
+    data_queued: u64,
+    dead_thread: bool,
+    data_written: u64,
+    high_water_mark: u64,
+    data_add_wait_count: u64,
+    data_remove_empty_count: u64,
+}
+
 impl ClientRequests {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            data: VecDeque::new(),
-            control: VecDeque::new(),
-            dead_thread: false,
-            data_written: 0,
-            hashes_written: 0,
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(Inner {
+                data: VecDeque::new(),
+                control: VecDeque::new(),
+                data_queued: 0,
+                dead_thread: false,
+                data_written: 0,
+                high_water_mark: HIGH_WATER_START,
+                data_add_wait_count: 0,
+                data_remove_empty_count: 0,
+            }),
+            condvar: Condvar::new(),
         })
     }
 
-    pub fn handle_data(&mut self, d: Data) {
-        self.data.push_back(d);
+    pub fn increment_counts(&self, data_written: u64) {
+        let mut inner = self.inner.lock();
+        inner.data_written += data_written;
     }
 
-    pub fn remove(&mut self) -> Option<Data> {
-        self.data.pop_front()
+    pub fn current_counts(&self) -> u64 {
+        let inner = self.inner.lock();
+        inner.data_written
     }
 
-    pub fn handle_control(&mut self, c: SyncCommand) {
-        self.control.push_back(c);
+    pub fn thread_exited(&self) {
+        let mut inner = self.inner.lock();
+        inner.dead_thread = true;
     }
 
-    pub fn remove_control(&mut self) -> Option<SyncCommand> {
-        self.control.pop_front()
+    pub fn no_longer_serviced(&self) -> bool {
+        let inner = self.inner.lock();
+        inner.dead_thread
+    }
+
+    pub fn handle_data(&self, d: Data) {
+        let mut inner = self.inner.lock();
+        if let Some(ref d) = d.data {
+            inner.data_queued += d.len() as u64;
+        }
+        inner.data.push_back(d);
+
+        if inner.data_queued >= inner.high_water_mark {
+            inner.data_add_wait_count += 1;
+
+            if inner.data_add_wait_count > 3 && inner.data_remove_empty_count > 0 {
+                inner.high_water_mark += (1024 * 1024) as u64;
+                inner.data_add_wait_count = 0;
+                inner.data_remove_empty_count = 0;
+            }
+
+            while inner.data_queued > inner.high_water_mark - (1024 * 1024) {
+                self.condvar.wait(&mut inner);
+            }
+        }
+    }
+
+    pub fn remove(&self) -> Option<Data> {
+        let mut inner = self.inner.lock();
+        let r = inner.data.pop_front();
+        if let Some(ref tmp) = r {
+            if let Some(ref d) = tmp.data {
+                inner.data_queued = inner.data_queued.saturating_sub(d.len() as u64);
+                self.condvar.notify_one();
+            }
+        } else {
+            inner.data_remove_empty_count += 1;
+        }
+
+        r
+    }
+
+    pub fn handle_control(&self, c: SyncCommand) {
+        let mut inner = self.inner.lock();
+        inner.control.push_back(c);
+    }
+
+    pub fn remove_control(&self) -> Option<SyncCommand> {
+        let mut inner = self.inner.lock();
+        inner.control.pop_front()
     }
 }
 
@@ -146,9 +213,8 @@ pub const END: Data = Data {
     entry: None,
 };
 
-pub fn client_thread_end(client_req: &Mutex<ClientRequests>) {
-    let mut rq = client_req.lock();
-    rq.handle_data(END);
+pub fn client_thread_end(client_req: &Arc<ClientRequests>) {
+    client_req.handle_data(END);
 }
 
 impl Client {
@@ -160,20 +226,18 @@ impl Client {
             data_inflight: HashMap::new(),
             cmds_inflight: HashMap::new(),
             so,
-            req_q: Arc::new(Mutex::new(ClientRequests::new()?)),
+            req_q: ClientRequests::new(),
             cuckoo: None,
             cuckoo_req_outstanding: false,
         })
     }
 
     fn remove_data_req(&mut self) -> Option<Data> {
-        let mut req = self.req_q.lock();
-        req.remove()
+        self.req_q.remove()
     }
 
     fn remove_control_req(&mut self) -> Option<SyncCommand> {
-        let mut req = self.req_q.lock();
-        req.remove_control()
+        self.req_q.remove_control()
     }
 
     fn request_cuckoo(&mut self, w_b: &mut wire::OutstandingWrites) -> Result<wire::IOResult> {
@@ -361,11 +425,7 @@ impl Client {
                     }
                 }
                 wire::Rpc::PackResp(id, p) => {
-                    {
-                        let mut rq = self.req_q.lock();
-                        rq.data_written += p.data_written;
-                    }
-
+                    self.req_q.increment_counts(p.data_written);
                     let e = MapEntry::Data {
                         slab: p.slab,
                         offset: p.offset,
@@ -540,11 +600,7 @@ impl Client {
     pub fn run(&mut self) -> Result<()> {
         let result = self._run();
 
-        {
-            // Indicate that we don't have anything servicing the request queue.
-            let mut req = self.req_q.lock();
-            req.dead_thread = true;
-        }
+        self.req_q.thread_exited();
 
         if let Err(e) = result {
             eprintln!("Client runner errored: {}", e);
@@ -554,18 +610,17 @@ impl Client {
         Ok(())
     }
 
-    pub fn get_request_queue(&self) -> Arc<Mutex<ClientRequests>> {
+    pub fn get_request_queue(&self) -> Arc<ClientRequests> {
         self.req_q.clone()
     }
 }
 
-pub fn rpc_invoke(rq: &Mutex<ClientRequests>, rpc: wire::Rpc) -> Result<Option<wire::Rpc>> {
+pub fn rpc_invoke(rq: &Arc<ClientRequests>, rpc: wire::Rpc) -> Result<Option<wire::Rpc>> {
     let h: handshake::HandShake;
     {
         let cmd = SyncCommand::new(Command::Cmd(Box::new(rpc)));
         h = cmd.h.clone();
-        let mut req = rq.lock();
-        req.handle_control(cmd);
+        rq.handle_control(cmd);
     }
 
     // Wait for this to be done

@@ -2,7 +2,6 @@ use anyhow::{anyhow, Context, Result};
 use chrono::prelude::*;
 use clap::ArgMatches;
 use io::{Read, Seek, Write};
-use parking_lot::Mutex;
 use serde_json::json;
 use serde_json::to_string_pretty;
 use size_display::Size;
@@ -43,7 +42,7 @@ trait UnpackDest {
 }
 
 struct Remote {
-    rq: Arc<Mutex<client::ClientRequests>>,
+    rq: Arc<client::ClientRequests>,
     socket_thread: Option<JoinHandle<std::result::Result<(), anyhow::Error>>>,
     entry_thread: Option<JoinHandle<std::result::Result<(), anyhow::Error>>>,
     _td: TempDir,
@@ -189,8 +188,7 @@ impl Unpacker {
                 }
 
                 {
-                    let rq = remote.rq.lock();
-                    if rq.dead_thread {
+                    if remote.rq.no_longer_serviced() {
                         socket_thread_alive = false;
                         break;
                     }
@@ -271,11 +269,7 @@ impl Unpacker {
 ///
 /// TODO: We need to place limits on how much data we have outstanding to the server as we could
 /// use too much memory during this process.
-fn build_entries(
-    rq: Arc<Mutex<client::ClientRequests>>,
-    stream: PathBuf,
-    so: StreamOrder,
-) -> Result<()> {
+fn build_entries(rq: Arc<client::ClientRequests>, stream: PathBuf, so: StreamOrder) -> Result<()> {
     use MapEntry::*;
     let mut stream_file = SlabFileBuilder::open(&stream).build()?;
     let nr_slabs = stream_file.get_nr_slabs();
@@ -308,7 +302,6 @@ fn build_entries(
                         data: None,
                         entry: Some(*e),
                     };
-                    let mut rq = rq.lock();
                     rq.handle_data(data);
                 }
                 Partial {
@@ -336,7 +329,6 @@ fn build_entries(
                         data: None,
                         entry: Some(*e),
                     };
-                    let mut rq = rq.lock();
                     rq.handle_data(data);
                 }
                 _ => so.entry_add(*e, None, None),
@@ -553,7 +545,7 @@ impl UnpackDest for ThinDest {
 }
 
 fn _retrieve_stream(
-    rq: &Mutex<client::ClientRequests>,
+    rq: &Arc<client::ClientRequests>,
     stream_id: &str,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let rc = client::rpc_invoke(rq, wire::Rpc::StreamRetrieve(0, stream_id.to_string()))?
@@ -571,7 +563,7 @@ fn _retrieve_stream(
 }
 
 fn _retrieve_stream_config(
-    rq: &Mutex<client::ClientRequests>,
+    rq: &Arc<client::ClientRequests>,
     stream_id: &str,
 ) -> Result<stream_meta::StreamConfig> {
     let rc = client::rpc_invoke(rq, wire::Rpc::StreamConfig(0, stream_id.to_string()))?
@@ -718,6 +710,7 @@ pub fn run_receive(matches: &ArgMatches, screen: Arc<Output>) -> Result<()> {
     };
 
     // Check the size matches the stream size.
+
     let stream_cfg = _retrieve_stream_config(&remote.rq, stream_id)?;
     let stream_size = stream_cfg.size;
 
