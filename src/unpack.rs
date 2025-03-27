@@ -683,6 +683,14 @@ pub fn run_receive(matches: &ArgMatches, screen: Arc<Output>) -> Result<()> {
         ));
     };
 
+    // Check the size matches the stream size.
+    let stream_cfg = _retrieve_stream_config(&rq, stream_id)?;
+    let stream_size = stream_cfg.size;
+
+    if !*create && stream_size != thinp::file_utils::file_size(output_file)? {
+        return Err(anyhow!("Destination size doesn't not match stream size"));
+    }
+
     // Fetch stream file from server
     let (stream_data, offset_data) = _retrieve_stream(&rq, stream_id)?;
 
@@ -708,15 +716,6 @@ pub fn run_receive(matches: &ArgMatches, screen: Arc<Output>) -> Result<()> {
         _td: td,
         so,
     };
-
-    // Check the size matches the stream size.
-
-    let stream_cfg = _retrieve_stream_config(&remote.rq, stream_id)?;
-    let stream_size = stream_cfg.size;
-
-    if !*create && stream_size != thinp::file_utils::file_size(output_file)? {
-        return Err(anyhow!("Destination size doesn't not match stream size"));
-    }
 
     let arg = UnpackOptions {
         screen,
