@@ -166,8 +166,6 @@ impl Unpacker {
         let mut socket_thread_alive: bool = true;
         let mut amt_written = 0;
 
-        let start_time: DateTime<Utc> = Utc::now();
-
         if self.remote.is_some() {
             let mut remote = self.remote.take().unwrap();
 
@@ -243,7 +241,7 @@ impl Unpacker {
         self.dest.complete()?;
         screen.report.progress(100);
         let end_time: DateTime<Utc> = Utc::now();
-        let elapsed = end_time - start_time;
+        let elapsed = end_time - screen.start_time;
         let elapsed = elapsed.num_milliseconds() as f64 / 1000.0;
 
         if no_errors {

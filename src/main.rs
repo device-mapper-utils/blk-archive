@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::prelude::*;
 use clap::{command, Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use std::env;
 use std::path::Path;
@@ -249,6 +250,7 @@ fn main_() -> Result<()> {
     let report = mk_report(&matches);
     report.set_level(LogLevel::Info);
     let output = Arc::new(Output {
+        start_time: Utc::now(),
         report: report.clone(),
         json: matches.get_flag("JSON"),
     });

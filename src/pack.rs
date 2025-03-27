@@ -211,7 +211,6 @@ impl Packer {
         )?;
 
         self.output.report.progress(0);
-        let start_time: DateTime<Utc> = Utc::now();
 
         let mut total_read = 0u64;
         for chunk in &mut self.it {
@@ -242,7 +241,7 @@ impl Packer {
         handler.archive.flush()?;
 
         let end_time: DateTime<Utc> = Utc::now();
-        let elapsed = end_time - start_time;
+        let elapsed = end_time - self.output.start_time;
         let elapsed = elapsed.num_milliseconds() as f64 / 1000.0;
 
         let stream_id = handler.stream_meta.stream_id;
