@@ -1,11 +1,13 @@
 use anyhow::Result;
 
+use crate::threaded_hasher::HashedData;
+
 //-----------------------------------------
 
 pub type IoVec<'a> = Vec<&'a [u8]>;
 
 pub trait IoVecHandler {
-    fn handle_data(&mut self, iov: &IoVec) -> Result<()>;
+    fn handle_data(&mut self, d: HashedData) -> Result<()>;
     fn complete(&mut self) -> Result<()>;
 }
 
@@ -44,6 +46,19 @@ pub fn all_same(iov: &IoVec) -> Option<u8> {
             }
         }
         Some(first_b)
+    } else {
+        None
+    }
+}
+
+pub fn all_same_vec(vec: &[u8]) -> Option<u8> {
+    if vec.is_empty() {
+        return None;
+    }
+
+    let first = vec[0];
+    if vec.iter().skip(1).all(|&b| b == first) {
+        Some(first)
     } else {
         None
     }

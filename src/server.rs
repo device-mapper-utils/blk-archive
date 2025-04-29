@@ -199,7 +199,7 @@ impl Server {
                     let hash256 = bytes_to_hash256(&hash);
                     iov.push(&c.bm.buff[c.bm.data_start..c.bm.data_end]);
                     let (entry, data_written) =
-                        self.da.data_add(*hash256, &iov, c.bm.data_len())?;
+                        self.da.data_add_iov(*hash256, &iov, c.bm.data_len())?;
                     let new_entry = wire::PackResp {
                         slab: entry.0,
                         offset: entry.1,

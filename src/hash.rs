@@ -49,6 +49,14 @@ pub fn hash_64(v: &[u8]) -> Hash64 {
     hasher.finalize()
 }
 
+pub fn hash_64_to_u64(v: &Hash64) -> u64 {
+    u64::from_le_bytes(
+        v[..8]
+            .try_into()
+            .expect("hash_64 must return at least 8 bytes"),
+    )
+}
+
 pub fn hash_32(v: &[u8]) -> Hash32 {
     let mut hasher = Blake2b32::new();
     hasher.update(v);

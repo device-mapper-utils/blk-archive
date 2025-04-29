@@ -12,6 +12,7 @@ blake2 = "0.10"
 byteorder = "1.4"
 chrono = "0.4"
 clap = { version = "4.5.26", features = ["cargo", "env"] }
+crossbeam = "0.8"
 devicemapper = { git = "https://github.com/stratis-storage/devicemapper-rs", branch = "master" }
 epoll = "4.3"
 gearhash = "0.1.3"

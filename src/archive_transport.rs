@@ -9,15 +9,20 @@ use crate::archive;
 use crate::client;
 use crate::handshake::HandShake;
 use crate::hash::*;
-use crate::iovec::*;
 use crate::paths::*;
 use crate::slab::*;
 use crate::stream::*;
 use crate::stream_meta;
 use crate::stream_orderer::*;
+use crate::threaded_hasher::*;
 
 pub trait Transport {
-    fn pack(&mut self, so: &mut StreamOrder, iov: &IoVec, len: u64) -> Result<u64>;
+    fn pack(
+        &mut self,
+        so: &mut StreamOrder<Sentry>,
+        hashed_data: HashedData,
+        len: u64,
+    ) -> Result<u64>;
     fn complete(
         &mut self,
         sm: &mut stream_meta::StreamMeta,
@@ -62,16 +67,23 @@ impl LocalArchive {
 }
 
 impl Transport for LocalArchive {
-    fn pack(&mut self, so: &mut StreamOrder, iov: &IoVec, len: u64) -> Result<u64> {
-        let h = hash_256_iov(iov);
-
-        let ((slab, offset), len_written) = self.ad.data_add(h, iov, len)?;
+    fn pack(
+        &mut self,
+        so: &mut StreamOrder<Sentry>,
+        hashed_data: HashedData,
+        len: u64,
+    ) -> Result<u64> {
+        let ((slab, offset), len_written) = self.ad.data_add(hashed_data, len)?;
         let me = MapEntry::Data {
             slab,
             offset,
             nr_entries: 1,
         };
-        so.entry_add(me, Some(len), None);
+        so.entry_add(Sentry {
+            e: me,
+            len: Some(len),
+            data: None,
+        });
         Ok(len_written)
     }
 
@@ -90,7 +102,7 @@ impl Transport for LocalArchive {
 }
 
 impl RemoteArchive {
-    fn new(s_conn: String, so: StreamOrder) -> Result<Self> {
+    fn new(s_conn: String, so: StreamOrder<Sentry>) -> Result<Self> {
         println!("Client is connecting to server using {}", s_conn);
         let mut client = client::Client::new(s_conn, so)?;
         let rq = client.get_request_queue();
@@ -107,12 +119,11 @@ impl RemoteArchive {
 }
 
 impl Transport for RemoteArchive {
-    fn pack(&mut self, so: &mut StreamOrder, iov: &IoVec, len: u64) -> Result<u64> {
-        let h = hash_256_iov(iov);
+    fn pack(&mut self, so: &mut StreamOrder<Sentry>, hd: HashedData, len: u64) -> Result<u64> {
         let data = client::Data {
             id: so.entry_start(),
-            t: client::IdType::Pack(hash256_to_bytes(&h), len),
-            data: Some(io_vec_to_vec(iov)),
+            t: client::IdType::Pack(hash256_to_bytes(&hd.h256), len),
+            data: Some(hd.data),
             entry: None,
         };
         self.client.handle_data(data);
@@ -157,7 +168,7 @@ impl Transport for RemoteArchive {
 
 pub fn create_archive_transport(
     server_addr: Option<String>,
-    so: StreamOrder,
+    so: StreamOrder<Sentry>,
     matches: &ArgMatches,
 ) -> Result<Box<dyn Transport>> {
     if let Some(s_conn) = server_addr {

@@ -7,6 +7,7 @@ use crate::hash_index::*;
 use crate::iovec::*;
 use crate::paths;
 use crate::slab::*;
+use crate::threaded_hasher::*;
 use clap::ArgMatches;
 use parking_lot::Mutex;
 use std::io::Write;
@@ -190,19 +191,18 @@ impl Data {
         Ok(())
     }
 
-    // Returns the (slab, entry) for the IoVec which may/may not already exist.
-    pub fn data_add(&mut self, h: Hash256, iov: &IoVec, len: u64) -> Result<((u32, u32), u64)> {
-        // There is an inherent race condition between checking if we have it and adding it,
-        // check before we add when this functionality ends up on a server side.
+    fn data_add_common<'a>(
+        &mut self,
+        h: Hash256,
+        data: impl IntoIterator<Item = &'a [u8]>,
+        len: u64,
+    ) -> Result<((u32, u32), u64)> {
         if let Some(location) = self.is_known(&h)? {
             return Ok((location, 0));
         }
 
-        // Add entry to cuckoo filter, not checking return value as we could get indication that
-        // it's "PossiblyPresent" when our logical expectation is "Inserted".
-        let ts_result = self.seen.test_and_set(hash_le_u64(&h), self.current_slab);
-        if ts_result.is_err() {
-            // Exceeded capacity, rebuild with more capacity.
+        let h64 = hash_le_u64(&h);
+        if self.seen.test_and_set(h64, self.current_slab).is_err() {
             let s = self.seen.capacity() * 2;
             self.rebuild_index(s)?;
         }
@@ -212,12 +212,20 @@ impl Data {
         }
 
         let r = (self.current_slab, self.current_entries as u32);
-        for v in iov {
-            self.data_buf.extend_from_slice(v);
+        for chunk in data {
+            self.data_buf.extend_from_slice(chunk);
         }
         self.current_entries += 1;
         self.current_index.insert(h, len as usize);
         Ok((r, len))
+    }
+
+    pub fn data_add(&mut self, h: HashedData, len: u64) -> Result<((u32, u32), u64)> {
+        self.data_add_common(h.h256, std::iter::once(&h.data[..]), len)
+    }
+
+    pub fn data_add_iov(&mut self, h: Hash256, iov: &IoVec, len: u64) -> Result<((u32, u32), u64)> {
+        self.data_add_common(h, iov.iter().map(|v| &v[..]), len)
     }
 
     // Have we seen this hash before, if we have we will return the slab and offset

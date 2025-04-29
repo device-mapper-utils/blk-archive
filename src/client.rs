@@ -21,7 +21,7 @@ pub struct Client {
     s: Box<dyn ReadAndWrite>,
     data_inflight: HashMap<u64, Data>, // Data items waiting to complete
     cmds_inflight: HashMap<u64, HandShake>,
-    so: StreamOrder,
+    so: StreamOrder<Sentry>,
     req_q: Arc<ClientRequests>,
     cuckoo: Option<cuckoo_filter::CuckooFilter>,
     cuckoo_req_outstanding: bool,
@@ -218,7 +218,7 @@ pub fn client_thread_end(client_req: &Arc<ClientRequests>) {
 }
 
 impl Client {
-    pub fn new(server: String, so: StreamOrder) -> Result<Self> {
+    pub fn new(server: String, so: StreamOrder<Sentry>) -> Result<Self> {
         let s = create_connected_socket(server)?;
 
         Ok(Self {
@@ -379,8 +379,15 @@ impl Client {
                         // device which would prevent us from having to allocate memory here.
                         let mut data = Vec::with_capacity(r.data_len() as usize);
                         data.extend_from_slice(&r.buff[r.data_start..r.data_end]);
-                        self.so
-                            .entry_complete(id, removed.entry.unwrap(), None, Some(data));
+
+                        self.so.entry_complete(
+                            id,
+                            Sentry {
+                                e: removed.entry.unwrap(),
+                                len: None,
+                                data: Some(data),
+                            },
+                        );
                     }
                 }
                 wire::Rpc::HaveDataRespYes(y) => {
@@ -395,7 +402,14 @@ impl Client {
 
                         match removed.t {
                             IdType::Pack(_hash, len) => {
-                                self.so.entry_complete(s.id, e, Some(len), None);
+                                self.so.entry_complete(
+                                    s.id,
+                                    Sentry {
+                                        e,
+                                        len: Some(len),
+                                        data: None,
+                                    },
+                                );
                             }
                             _ => {
                                 panic!("We are expecting only Pack type!");
@@ -448,7 +462,12 @@ impl Client {
                             }
                         }
 
-                        self.so.entry_complete(id, e, Some(len), None);
+                        let se = Sentry {
+                            e,
+                            len: Some(len),
+                            data: None,
+                        };
+                        self.so.entry_complete(id, se);
                     } else {
                         panic!("we're expecting IdType::Pack, got {:?}", removed.t);
                     }

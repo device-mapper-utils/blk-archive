@@ -26,6 +26,7 @@ pub mod stream_builders;
 pub mod stream_meta;
 pub mod stream_orderer;
 pub mod thin_metadata;
+pub mod threaded_hasher;
 pub mod unpack;
 pub mod utils;
 pub mod version;

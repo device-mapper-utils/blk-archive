@@ -28,6 +28,7 @@ use crate::slab::builder::*;
 use crate::stream;
 use crate::stream::*;
 use crate::stream_meta;
+use crate::stream_orderer::Sentry;
 use crate::stream_orderer::StreamOrder;
 use crate::thin_metadata::*;
 use crate::wire;
@@ -46,7 +47,7 @@ struct Remote {
     socket_thread: Option<JoinHandle<std::result::Result<(), anyhow::Error>>>,
     entry_thread: Option<JoinHandle<std::result::Result<(), anyhow::Error>>>,
     _td: TempDir,
-    so: StreamOrder,
+    so: StreamOrder<Sentry>,
 }
 
 struct Unpacker {
@@ -267,7 +268,11 @@ impl Unpacker {
 ///
 /// TODO: We need to place limits on how much data we have outstanding to the server as we could
 /// use too much memory during this process.
-fn build_entries(rq: Arc<client::ClientRequests>, stream: PathBuf, so: StreamOrder) -> Result<()> {
+fn build_entries(
+    rq: Arc<client::ClientRequests>,
+    stream: PathBuf,
+    so: StreamOrder<Sentry>,
+) -> Result<()> {
     use MapEntry::*;
     let mut stream_file = SlabFileBuilder::open(&stream).build()?;
     let nr_slabs = stream_file.get_nr_slabs();
@@ -329,7 +334,11 @@ fn build_entries(rq: Arc<client::ClientRequests>, stream: PathBuf, so: StreamOrd
                     };
                     rq.handle_data(data);
                 }
-                _ => so.entry_add(*e, None, None),
+                _ => so.entry_add(Sentry {
+                    e: *e,
+                    len: None,
+                    data: None,
+                }),
             }
         }
     }

@@ -1,5 +1,6 @@
 use parking_lot::{Condvar, Mutex};
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use crate::stream::MapEntry;
@@ -14,32 +15,38 @@ pub struct Sentry {
 }
 
 #[derive(Debug)]
-struct Protected {
+struct Protected<T> {
     seq_id: u64,
     next: u64,
-    ready: BTreeMap<u64, Sentry>,
+    ready: BTreeMap<u64, T>,
 }
 
 #[derive(Debug)]
-pub struct StreamOrder {
-    pair: Arc<(Mutex<Protected>, Condvar)>,
+pub struct StreamOrder<T> {
+    pair: Arc<(Mutex<Protected<T>>, Condvar)>,
 }
 
-impl std::clone::Clone for StreamOrder {
+impl<T> Clone for StreamOrder<T> {
     fn clone(&self) -> Self {
         Self {
-            pair: self.pair.clone(),
+            pair: Arc::clone(&self.pair),
         }
     }
 }
 
-impl Default for StreamOrder {
+impl<T> Default for StreamOrder<T>
+where
+    T: Debug,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl StreamOrder {
+impl<T> StreamOrder<T>
+where
+    T: Debug,
+{
     pub fn new() -> Self {
         let p = Mutex::new(Protected {
             seq_id: 0,
@@ -52,45 +59,44 @@ impl StreamOrder {
         }
     }
 
-    fn _next(p: &mut Protected) -> u64 {
+    fn _next(p: &mut Protected<T>) -> u64 {
         let v = p.seq_id;
         p.seq_id += 1;
         v
     }
 
-    pub fn entry_add(&self, e: MapEntry, len: Option<u64>, data: Option<Vec<u8>>) {
+    pub fn entry_add(&self, item: T) {
         let (protected, cvar) = &*self.pair;
         let mut p = protected.lock();
         let next = Self::_next(&mut p);
-        p.ready.insert(next, Sentry { e, len, data });
+        p.ready.insert(next, item);
         cvar.notify_all();
     }
 
     pub fn entry_start(&self) -> u64 {
-        let (protected, _cvar) = &*self.pair;
-
+        let (protected, _) = &*self.pair;
         let mut p = protected.lock();
         Self::_next(&mut p)
     }
 
-    pub fn entry_complete(&self, id: u64, e: MapEntry, len: Option<u64>, data: Option<Vec<u8>>) {
+    pub fn entry_complete(&self, id: u64, item: T) {
         let (protected, cvar) = &*self.pair;
         let mut p = protected.lock();
-        p.ready.insert(id, Sentry { e, len, data });
+        p.ready.insert(id, item);
         cvar.notify_all();
     }
 
-    fn remove(p: &mut Protected) -> Option<Sentry> {
+    fn remove(p: &mut Protected<T>) -> Option<T> {
         p.ready.remove(&p.next).inspect(|_| {
             p.next += 1;
         })
     }
 
-    fn _complete(p: &Protected) -> bool {
+    fn _complete(p: &Protected<T>) -> bool {
         p.ready.is_empty() && (p.seq_id == p.next) && p.seq_id > 0
     }
 
-    pub fn drain(&mut self, wait: bool) -> (Vec<Sentry>, bool) {
+    pub fn drain(&self, wait: bool) -> (Vec<T>, bool) {
         let (protected, cvar) = &*self.pair;
         let mut p = protected.lock();
 
@@ -113,7 +119,7 @@ impl StreamOrder {
     }
 
     pub fn is_complete(&self) -> bool {
-        let (protected, _cvar) = &*self.pair;
+        let (protected, _) = &*self.pair;
         let p = protected.lock();
         Self::_complete(&p)
     }

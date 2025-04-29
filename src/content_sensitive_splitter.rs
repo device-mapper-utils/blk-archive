@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 
 use crate::iovec::*;
 use crate::splitter::*;
+use crate::threaded_hasher;
 use crate::utils::round_pow2;
 
 //-----------------------------------------
@@ -23,6 +24,7 @@ pub struct ContentSensitiveSplitter {
     blocks: VecDeque<Vec<u8>>,
 
     consume_c: Cursor,
+    pub th: threaded_hasher::ThreadedHasher,
 }
 
 impl ContentSensitiveSplitter {
@@ -41,6 +43,7 @@ impl ContentSensitiveSplitter {
             blocks: VecDeque::new(),
 
             consume_c: Cursor::default(),
+            th: threaded_hasher::ThreadedHasher::new(6),
         }
     }
 
@@ -158,10 +161,14 @@ impl Splitter for ContentSensitiveSplitter {
         self.blocks.push_back(buffer);
         self.unconsumed_len += len as u64;
 
+        // Rip through the consumes and dump data into some threads to calculate the hashes
         for consume_len in consumes {
-            handler.handle_data(&self.consume(consume_len))?;
+            let iov = self.consume(consume_len);
+            let iov_bytes = io_vec_to_vec(&iov);
+            self.th.enqueue_data(iov_bytes);
         }
 
+        self.th.handle_all_outstanding(handler)?;
         self.drop_old_blocks();
         Ok(())
     }
@@ -169,7 +176,9 @@ impl Splitter for ContentSensitiveSplitter {
     fn next_break(&mut self, handler: &mut impl IoVecHandler) -> Result<()> {
         let iov = self.consume_all();
         if !iov.is_empty() {
-            handler.handle_data(&iov)?;
+            let iov_bytes = io_vec_to_vec(&iov);
+            self.th.enqueue_data(iov_bytes);
+            self.th.handle_all_outstanding(handler)?;
             self.drop_old_blocks();
         }
 
@@ -180,7 +189,11 @@ impl Splitter for ContentSensitiveSplitter {
 
     fn complete(mut self, handler: &mut impl IoVecHandler) -> Result<()> {
         self.next_break(handler)?;
+
+        self.th.handle_all_outstanding(handler)?;
+
         handler.complete()?;
+        self.th.shut_down();
         Ok(())
     }
 }
@@ -193,9 +206,11 @@ mod splitter_tests {
     use blake2::{Blake2s256, Digest};
     use rand::*;
     use std::collections::BTreeMap;
+    use std::fs::File;
     use std::io::{BufReader, BufWriter, Read, Write};
 
     use crate::hash::*;
+    use crate::threaded_hasher::HashedData;
 
     fn rand_buffer(count: usize) -> Vec<u8> {
         let mut buffer = Vec::new();
@@ -249,10 +264,8 @@ mod splitter_tests {
     }
 
     impl<W: Write> IoVecHandler for CatHandler<'_, W> {
-        fn handle_data(&mut self, iov: &IoVec) -> Result<()> {
-            for v in iov {
-                self.output.write_all(v)?;
-            }
+        fn handle_data(&mut self, hd: HashedData) -> Result<()> {
+            self.output.write_all(&hd.data)?;
 
             Ok(())
         }
@@ -311,15 +324,12 @@ mod splitter_tests {
     }
 
     impl IoVecHandler for TestHandler {
-        fn handle_data(&mut self, iov: &IoVec) -> Result<()> {
+        fn handle_data(&mut self, hd: HashedData) -> Result<()> {
             self.nr_chunks += 1;
 
-            let mut len = 0;
+            let len = hd.data.len();
             let mut hasher = Blake2s256::new();
-            for v in iov {
-                len += v.len();
-                hasher.update(&v[..]);
-            }
+            hasher.update(&hd.data[..]);
 
             let e = self.hashes.entry(hasher.finalize()).or_default();
 
@@ -362,6 +372,14 @@ mod splitter_tests {
         splitter.complete(handler).expect("split complete failed");
     }
 
+    fn write_bytes_to_file(filename: &str, data: &[u8]) -> Result<()> {
+        let mut file = File::create(filename)?; // Create or truncate the file
+        file.write_all(data)?; // Write the bytes to the file
+        file.flush()?; // Ensure all data is written to disk
+        drop(file); // Explicitly close the file (optional, as Rust drops it automatically)
+        Ok(())
+    }
+
     #[test]
     fn splitter_emits_all_data() {
         let input_buf = prep_data();
@@ -375,6 +393,13 @@ mod splitter_tests {
 
         drop(input);
         drop(output);
+
+        if input_buf != output_buf {
+            eprintln!("We're going to assert, debug in /tmp");
+            write_bytes_to_file("/tmp/expected.bin", &input_buf).unwrap();
+            write_bytes_to_file("/tmp/actual.bin", &output_buf).unwrap();
+        }
+
         assert_eq!(input_buf, output_buf);
     }
 

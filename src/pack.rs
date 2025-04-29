@@ -27,6 +27,7 @@ use crate::stream_builders::*;
 use crate::stream_meta;
 use crate::stream_orderer::*;
 use crate::thin_metadata::*;
+use crate::threaded_hasher::HashedData;
 
 //-----------------------------------------
 struct DedupHandler {
@@ -35,7 +36,7 @@ struct DedupHandler {
     pub stream_meta: stream_meta::StreamMeta,
     mapping_builder: Arc<Mutex<dyn Builder>>,
     pub stats: stream_meta::StreamStats,
-    so: StreamOrder,
+    so: StreamOrder<Sentry>,
     archive: Box<dyn archive_transport::Transport>,
 }
 
@@ -95,7 +96,12 @@ impl DedupHandler {
     }
 
     fn enqueue_entry(&mut self, e: MapEntry, len: u64) -> Result<()> {
-        self.so.entry_add(e, Some(len), None);
+        let se = Sentry {
+            e,
+            len: Some(len),
+            data: None,
+        };
+        self.so.entry_add(se);
         Ok(())
     }
 
@@ -115,13 +121,13 @@ impl DedupHandler {
 }
 
 impl IoVecHandler for DedupHandler {
-    fn handle_data(&mut self, iov: &IoVec) -> Result<()> {
+    fn handle_data(&mut self, hash_data: HashedData) -> Result<()> {
         self.nr_chunks += 1;
-        let len = iov_len_(iov);
+        let len = hash_data.data.len() as u64;
         self.stats.mapped_size += len;
         assert!(len != 0);
 
-        if let Some(first_byte) = all_same(iov) {
+        if let Some(first_byte) = all_same_vec(&hash_data.data) {
             self.stats.fill_size += len;
             self.enqueue_entry(
                 MapEntry::Fill {
@@ -131,7 +137,7 @@ impl IoVecHandler for DedupHandler {
                 len,
             )?;
         } else {
-            self.stats.written += self.archive.pack(&mut self.so, iov, len)?;
+            self.stats.written += self.archive.pack(&mut self.so, hash_data, len)?;
         }
 
         self.process_stream(false)?;
