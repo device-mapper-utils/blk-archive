@@ -470,6 +470,20 @@ pub type IVec = Vec<MapInstruction>;
     // Derives can be passed through to the generated type:
     derive(Debug),
 )]
+pub struct DataFields {
+    pub slab: u32,
+    pub offset: u32,
+    pub nr_entries: u32,
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[rkyv(
+    // This will generate a PartialEq impl between our unarchived
+    // and archived types
+    compare(PartialEq),
+    // Derives can be passed through to the generated type:
+    derive(Debug),
+)]
 pub enum MapEntry {
     Fill {
         byte: u8,
@@ -478,10 +492,10 @@ pub enum MapEntry {
     Unmapped {
         len: u64,
     },
-    Data {
-        slab: u32,
-        offset: u32,
-        nr_entries: u32,
+    Data(DataFields),
+    DataWithLen {
+        d: DataFields,
+        len: u64,
     },
     Partial {
         begin: u32,
@@ -752,11 +766,11 @@ impl MappingUnpacker {
                 nr_entries: len as u32,
             });
         } else {
-            r.push(MapEntry::Data {
+            r.push(MapEntry::Data(DataFields {
                 slab: top.slab,
                 offset: top.offset,
                 nr_entries: len as u32,
-            });
+            }));
         }
         top.offset += len as u32;
     }

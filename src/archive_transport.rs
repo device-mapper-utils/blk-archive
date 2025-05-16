@@ -74,11 +74,11 @@ impl Transport for LocalArchive {
         len: u64,
     ) -> Result<u64> {
         let ((slab, offset), len_written) = self.ad.data_add(hashed_data, len)?;
-        let me = MapEntry::Data {
+        let me = MapEntry::Data(DataFields {
             slab,
             offset,
             nr_entries: 1,
-        };
+        });
         so.entry_add(Sentry {
             e: me,
             len: Some(len),

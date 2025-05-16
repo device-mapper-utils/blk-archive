@@ -393,11 +393,11 @@ impl Client {
                 wire::Rpc::HaveDataRespYes(y) => {
                     // Server already had data, build the stream
                     for s in y {
-                        let e = MapEntry::Data {
+                        let e = MapEntry::Data(DataFields {
                             slab: s.slab,
                             offset: s.offset,
                             nr_entries: 1,
-                        };
+                        });
                         let removed = self.data_inflight.remove(&s.id).unwrap();
 
                         match removed.t {
@@ -440,11 +440,11 @@ impl Client {
                 }
                 wire::Rpc::PackResp(id, p) => {
                     self.req_q.increment_counts(p.data_written);
-                    let e = MapEntry::Data {
+                    let e = MapEntry::Data(DataFields {
                         slab: p.slab,
                         offset: p.offset,
                         nr_entries: 1,
-                    };
+                    });
                     let removed = self.data_inflight.remove(&id).unwrap();
 
                     if let IdType::Pack(hash, len) = removed.t {
@@ -493,6 +493,11 @@ impl Client {
                         .remove(&id)
                         .unwrap()
                         .done(Some(wire::Rpc::StreamRetrieveResp(id, data)));
+                }
+                wire::Rpc::StreamRetrieveDeltaResp(id, stream_config, map_entries) => {
+                    self.cmds_inflight.remove(&id).unwrap().done(Some(
+                        wire::Rpc::StreamRetrieveDeltaResp(id, stream_config, map_entries),
+                    ));
                 }
                 wire::Rpc::StreamConfigResp(id, config) => {
                     self.cmds_inflight

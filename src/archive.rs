@@ -7,6 +7,7 @@ use crate::hash_index::*;
 use crate::iovec::*;
 use crate::paths;
 use crate::slab::*;
+use crate::stream::{DataFields, MapEntry};
 use crate::threaded_hasher::*;
 use clap::ArgMatches;
 use parking_lot::Mutex;
@@ -49,6 +50,16 @@ pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: u64) -> 
 }
 
 impl Data {
+    fn get_config_slab_cap(matches: &ArgMatches) -> Result<u64> {
+        let config = read_config(".", matches)?;
+
+        let hashes_per_slab = std::cmp::max(SLAB_SIZE_TARGET / config.block_size, 1);
+        let slab_capacity = ((config.hash_cache_size_meg * 1024 * 1024)
+            / std::mem::size_of::<Hash256>() as u64)
+            / hashes_per_slab as u64;
+        Ok(slab_capacity)
+    }
+
     pub fn new(
         cache_entries: Option<u64>,
         data_file: Option<SlabFile>,
@@ -56,20 +67,15 @@ impl Data {
         matches: &ArgMatches,
     ) -> Result<Self> {
         let seen = CuckooFilter::read(paths::index_path())?;
-
-        let config = read_config(".", matches)?;
-
-        let hashes_per_slab = std::cmp::max(SLAB_SIZE_TARGET / config.block_size, 1);
-        let mut slab_capacity = ((config.hash_cache_size_meg * 1024 * 1024)
-            / std::mem::size_of::<Hash256>() as u64)
-            / hashes_per_slab as u64;
+        let mut slab_capacity = Self::get_config_slab_cap(matches)?;
 
         if let Some(cache_entries) = cache_entries {
             slab_capacity = cache_entries;
         }
 
         let hashes = lru::LruCache::new(NonZeroUsize::new(slab_capacity as usize).unwrap());
-        let slabs = lru::LruCache::new(NonZeroUsize::new(slab_capacity as usize).unwrap());
+        let slabs: lru::LruCache<u32, ByIndex> =
+            lru::LruCache::new(NonZeroUsize::new(slab_capacity as usize).unwrap());
 
         let data_file = data_file.unwrap_or(
             SlabFileBuilder::open(paths::data_path())
@@ -81,13 +87,14 @@ impl Data {
 
         let nr_slabs = data_file.get_nr_slabs() as u32;
 
-        let hashes_file = hashes_file.unwrap_or(Arc::new(Mutex::new(
-            SlabFileBuilder::open(paths::hashes_path())
-                .write(true)
-                .queue_depth(16)
-                .build()
-                .context("couldn't open hashes slab file")?,
-        )));
+        let hashes_file: Arc<parking_lot::lock_api::Mutex<parking_lot::RawMutex, SlabFile>> =
+            hashes_file.unwrap_or(Arc::new(Mutex::new(
+                SlabFileBuilder::open(paths::hashes_path())
+                    .write(true)
+                    .queue_depth(16)
+                    .build()
+                    .context("couldn't open hashes slab file")?,
+            )));
 
         {
             let hashes_file = hashes_file.lock();
@@ -113,12 +120,78 @@ impl Data {
         Ok(s)
     }
 
-    fn get_info(&mut self, slab: u32) -> Result<&ByIndex> {
-        self.slabs.try_get_or_insert(slab, || {
-            let mut hf = self.hashes_file.lock();
+    fn _get_info<'a>(
+        slabs: &'a mut lru::LruCache<u32, ByIndex>,
+        hashes_file: &mut Arc<Mutex<SlabFile>>,
+        slab: u32,
+    ) -> Result<&'a ByIndex> {
+        slabs.try_get_or_insert(slab, || {
+            let mut hf = hashes_file.lock();
             let hashes = hf.read(slab)?;
             ByIndex::new(hashes)
         })
+    }
+
+    pub fn calculate_entry_len(&mut self, d: &DataFields) -> Result<u64> {
+        Self::_calculate_entry_len(&mut self.slabs, &mut self.hashes_file, d)
+    }
+
+    pub fn _calculate_entry_len(
+        slabs: &mut lru::LruCache<u32, ByIndex>,
+        hashes_file: &mut Arc<Mutex<SlabFile>>,
+        d: &DataFields,
+    ) -> Result<u64> {
+        let index = Self::_get_info(slabs, hashes_file, d.slab)?;
+        let mut total_len = 0;
+        for i in d.offset..(d.offset + d.nr_entries) {
+            let (data_begin, data_end, _) = index.get(i as usize).unwrap();
+            total_len += data_end - data_begin;
+        }
+        Ok(total_len as u64)
+    }
+
+    fn get_map_entry_lengths(
+        slabs: &mut lru::LruCache<u32, ByIndex>,
+        hashes_file: &mut Arc<Mutex<SlabFile>>,
+        map_entries: &mut [MapEntry],
+    ) -> Result<()> {
+        for e in map_entries.iter_mut() {
+            if let MapEntry::Data(d) = e {
+                let len = Self::_calculate_entry_len(slabs, hashes_file, d)?;
+                *e = MapEntry::DataWithLen { d: *d, len };
+            }
+        }
+        Ok(())
+    }
+
+    pub fn calculate_stream_map_entry_lengths(
+        matches: &ArgMatches,
+        map_entries: &mut [MapEntry],
+    ) -> Result<()> {
+        // create a LRU and load hashes file and rip through the entries
+        let slab_capacity = Self::get_config_slab_cap(matches)?;
+
+        let mut slabs: lru::LruCache<u32, ByIndex> =
+            lru::LruCache::new(NonZeroUsize::new(slab_capacity as usize).unwrap());
+
+        let mut hashes_file = Arc::new(Mutex::new(
+            SlabFileBuilder::open(paths::hashes_path())
+                .write(true)
+                .queue_depth(16)
+                .build()
+                .context("couldn't open hashes slab file")?,
+        ));
+
+        Self::get_map_entry_lengths(&mut slabs, &mut hashes_file, map_entries)?;
+
+        Ok(())
+    }
+
+    pub fn calculate_stream_map_entry_lengths_m(
+        &mut self,
+        map_entries: &mut [MapEntry],
+    ) -> Result<()> {
+        Self::get_map_entry_lengths(&mut self.slabs, &mut self.hashes_file, map_entries)
     }
 
     pub fn ensure_extra_capacity(&mut self, blocks: usize) -> Result<()> {
@@ -284,7 +357,7 @@ impl Data {
         nr_entries: u32,
         partial: Option<(u32, u32)>,
     ) -> Result<(Arc<Vec<u8>>, usize, usize)> {
-        let info = self.get_info(slab)?;
+        let info = Self::_get_info(&mut self.slabs, &mut self.hashes_file, slab)?;
         let (data_begin, data_end) = Self::calculate_offsets(offset, nr_entries, info, partial);
         let data = self.data_file.read(slab)?;
 

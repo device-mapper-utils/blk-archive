@@ -11,6 +11,7 @@ use crate::client;
 use crate::config;
 use crate::cuckoo_filter;
 use crate::ipc::*;
+use crate::stream::MapEntry;
 use crate::stream_meta;
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
@@ -116,6 +117,9 @@ pub enum Rpc {
 
     StreamRetrieve(u64, String),
     StreamRetrieveResp(u64, Option<StreamFiles>),
+
+    StreamRetrieveDelta(u64, String),
+    StreamRetrieveDeltaResp(u64, stream_meta::StreamConfig, Vec<MapEntry>),
 
     RetrieveChunkReq(u64, client::IdType),
     RetrieveChunkResp(u64),

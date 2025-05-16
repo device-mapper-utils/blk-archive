@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::archive;
 use crate::archive_transport;
 use crate::chunkers::*;
+use crate::client;
 use crate::content_sensitive_splitter::*;
 use crate::iovec::*;
 use crate::output::Output;
@@ -28,6 +29,7 @@ use crate::stream_meta;
 use crate::stream_orderer::*;
 use crate::thin_metadata::*;
 use crate::threaded_hasher::HashedData;
+use crate::wire;
 
 //-----------------------------------------
 struct DedupHandler {
@@ -162,7 +164,7 @@ impl IoVecHandler for DedupHandler {
         archive::complete_slab(&mut self.stream_meta.stream_file, &mut self.stream_buf, 0)?;
         self.stream_meta.stream_file.close()?;
 
-        // The stream file is done, lets put the file in the correct place which could be the
+        // The stream file is done, lets put the create_archive_transportfile in the correct place which could be the
         // correct local archive directory or remote archive directory.
         self.archive
             .complete(&mut self.stream_meta, &mut self.stats)?;
@@ -358,20 +360,19 @@ fn thin_packer(output: Arc<Output>, names: stream_meta::StreamNames) -> Result<P
 }
 
 // FIXME: slow
-#[allow(dead_code)]
 fn open_thin_stream(stream_id: &str) -> Result<SlabFile> {
     SlabFileBuilder::open(stream_path(stream_id))
         .build()
         .context("couldn't open old stream file")
 }
 
-#[allow(dead_code)]
 fn thin_delta_packer(
+    matches: &ArgMatches,
     output: Arc<Output>,
     names: stream_meta::StreamNames,
     delta_device: &Path,
     delta_id: &str,
-    hashes_file: Arc<Mutex<SlabFile>>,
+    server: &Option<String>,
 ) -> Result<Packer> {
     let input = OpenOptions::new()
         .read(true)
@@ -383,14 +384,50 @@ fn thin_delta_packer(
     stats.size = thinp::file_utils::file_size(names.input_file.clone())?;
 
     let mappings = read_thin_delta(delta_device, &names.input_file.clone())?;
-    let old_config = stream_meta::read_stream_config(delta_id)?;
-    stats.mapped_size = old_config.mapped_size;
 
     let run_iter = DualIter::new(
         mappings.additions,
         mappings.removals,
         (stats.size / (mappings.data_block_size as u64 * 512)) as u32,
     );
+
+    let mut old_entries: Vec<MapEntry>;
+
+    if server.is_none() {
+        let old_config = stream_meta::read_stream_config(delta_id)?;
+        stats.mapped_size = old_config.mapped_size;
+
+        let old_stream = open_thin_stream(delta_id)?;
+        let stream_iter = StreamIter::new(old_stream)?;
+
+        // TODO: How much memory are we using here for large block devices?  Do we need to change
+        // this back to reading off of disk as we are processing the block device/file?
+        old_entries = stream_iter.collect::<Result<_, _>>()?;
+
+        archive::Data::calculate_stream_map_entry_lengths(matches, &mut old_entries)?;
+    } else {
+        // For client/server we need to fetch this from server
+        let server = server.clone().unwrap();
+        let response = client::one_rpc(
+            &server,
+            wire::Rpc::StreamRetrieveDelta(0, delta_id.to_string()),
+        );
+        match response {
+            Ok(v) => {
+                let v = v.unwrap();
+                if let wire::Rpc::StreamRetrieveDeltaResp(_id, meta, map_entries) = v {
+                    stats.mapped_size = meta.mapped_size;
+                    old_entries = map_entries;
+                } else {
+                    panic!("We are expecting a result from wire::Rpc::StreamRetrieveDeltaResp");
+                }
+            }
+            Err(e) => {
+                let msg = format!("error while retrieving delta stream meta data & stream map entries, server {} error {}", server, e);
+                return Err(anyhow!(msg));
+            }
+        }
+    }
 
     let input_iter = Box::new(DeltaChunker::new(
         input,
@@ -399,9 +436,7 @@ fn thin_delta_packer(
     ));
     let thin_id = Some(mappings.thin_id);
 
-    let old_stream = open_thin_stream(delta_id)?;
-    let old_entries = StreamIter::new(old_stream)?;
-    let builder = Arc::new(Mutex::new(DeltaBuilder::new(old_entries, hashes_file)));
+    let builder = Arc::new(Mutex::new(DeltaBuilder::new(old_entries.into_iter())));
 
     output
         .report
@@ -412,7 +447,6 @@ fn thin_delta_packer(
 }
 
 // Looks up both --delta-stream and --delta-device
-#[allow(dead_code)]
 fn get_delta_args(matches: &ArgMatches) -> Result<Option<(String, PathBuf)>> {
     match (
         matches.get_one::<String>("DELTA_STREAM"),
@@ -455,17 +489,16 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>, server: Option<String>) ->
         .report
         .set_title(&format!("Building packer {} ...", input_file.display()));
 
-    // TODO figure out how to make delta work in a remote send/receive environment
-    /*let packer = if let Some((delta_stream, delta_device)) = get_delta_args(matches)? {
-    thin_delta_packer(
-        output.clone(),
-        &input_file,
-        input_name,
-        &delta_device,
-        &delta_stream,
-        hashes_file.clone(),
-    )? */
-    let packer = if is_thin_device(&input_file)? {
+    let packer = if let Some((delta_stream, delta_device)) = get_delta_args(matches)? {
+        thin_delta_packer(
+            matches,
+            output.clone(),
+            names,
+            &delta_device,
+            &delta_stream,
+            &server,
+        )?
+    } else if is_thin_device(&input_file)? {
         thin_packer(output.clone(), names)?
     } else {
         thick_packer(output.clone(), names)?

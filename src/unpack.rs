@@ -109,11 +109,7 @@ impl Unpacker {
                 self.dest.handle_unmapped(*len)?;
                 amt_written = *len;
             }
-            Data {
-                slab,
-                offset,
-                nr_entries,
-            } => {
+            MapEntry::Data(d) | MapEntry::DataWithLen { d, .. } => {
                 if let Some(d) = data {
                     amt_written = d.len() as u64;
                     self.dest.handle_mapped(&d[..])?;
@@ -123,7 +119,7 @@ impl Unpacker {
                         self.da
                             .as_mut()
                             .unwrap()
-                            .data_get(*slab, *offset, *nr_entries, None)?;
+                            .data_get(d.slab, d.offset, d.nr_entries, None)?;
 
                     amt_written = (end - start) as u64;
                     self.dest.handle_mapped(&data[start..end])?;
@@ -284,18 +280,14 @@ fn build_entries(
 
         for e in entries.iter() {
             match e {
-                Data {
-                    slab,
-                    offset,
-                    nr_entries,
-                } => {
+                MapEntry::Data(d) | MapEntry::DataWithLen { d, .. } => {
                     let id = so.entry_start();
                     // Get a seq number and enqueue request
 
                     let slab_info = client::SlabInfo {
-                        slab: *slab,
-                        offset: *offset,
-                        nr_entries: *nr_entries,
+                        slab: d.slab,
+                        offset: d.offset,
+                        nr_entries: d.nr_entries,
                         partial: None,
                     };
 

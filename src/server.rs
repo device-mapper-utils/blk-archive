@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 
 use crate::hash::bytes_to_hash256;
-use crate::wire::{self, IOResult};
+use crate::wire::{self, IOResult, WriteChunk};
 use crate::{archive::*, config};
 
 use clap::ArgMatches;
@@ -36,6 +36,7 @@ struct ServerStats {
     archive_config: u64,
     stream_config: u64,
     stream_retrieve: u64,
+    stream_retrieve_delta: u64,
     retrieve_chunk_req: u64,
     cuckoo_filter_req: u64,
 }
@@ -156,6 +157,48 @@ impl Server {
         ))
     }
 
+    fn send_error(
+        id: u64,
+        c: &mut Client,
+        error: impl std::fmt::Display,
+        message_prefix: &str,
+        rc: &mut wire::IOResult,
+    ) -> Result<wire::IOResult> {
+        let message = format!("{}{}", message_prefix, error);
+
+        if wire::write_request(
+            &mut c.c,
+            &wire::Rpc::Error(id, message),
+            wire::WriteChunk::None,
+            &mut c.w,
+        )? {
+            *rc = wire::IOResult::WriteWouldBlock;
+        }
+
+        Ok(wire::IOResult::Ok)
+    }
+
+    fn send_rpc(
+        c: &mut Client,
+        m: &wire::Rpc,
+        d: wire::WriteChunk,
+        rc: &mut wire::IOResult,
+    ) -> Result<wire::IOResult> {
+        if wire::write_request(&mut c.c, m, d, &mut c.w)? {
+            *rc = wire::IOResult::WriteWouldBlock;
+        }
+
+        Ok(wire::IOResult::Ok)
+    }
+
+    fn send_rpc_no_data(
+        c: &mut Client,
+        m: &wire::Rpc,
+        rc: &mut wire::IOResult,
+    ) -> Result<wire::IOResult> {
+        Self::send_rpc(c, m, wire::WriteChunk::None, rc)
+    }
+
     fn process_read(&mut self, c: &mut Client) -> Result<wire::IOResult> {
         let mut found_it = Vec::new();
         let mut data_needed: Vec<u64> = Vec::new();
@@ -206,14 +249,8 @@ impl Server {
                         data_written,
                     };
 
-                    if wire::write_request(
-                        &mut c.c,
-                        &wire::Rpc::PackResp(id, Box::new(new_entry)),
-                        wire::WriteChunk::None,
-                        &mut c.w,
-                    )? {
-                        rc = wire::IOResult::WriteWouldBlock;
-                    }
+                    let r = wire::Rpc::PackResp(id, Box::new(new_entry));
+                    Self::send_rpc_no_data(c, &r, &mut rc)?;
                 }
                 wire::Rpc::StreamSend(id, sm, stream_files_bytes) => {
                     self.stats.stream_send += 1;
@@ -225,28 +262,14 @@ impl Server {
                     self.da.flush().unwrap();
                     match write_rc {
                         Ok(_) => {
-                            if wire::write_request(
-                                &mut c.c,
-                                &wire::Rpc::StreamSendComplete(id),
-                                wire::WriteChunk::None,
-                                &mut c.w,
-                            )? {
-                                rc = wire::IOResult::WriteWouldBlock;
-                            }
+                            Self::send_rpc_no_data(c, &wire::Rpc::StreamSendComplete(id), &mut rc)?;
                         }
                         Err(e) => {
                             let message = format!(
                                 "During stream write id={} for stream = {} we encountered {}",
                                 id, packed_path, e
                             );
-                            if wire::write_request(
-                                &mut c.c,
-                                &wire::Rpc::Error(id, message),
-                                wire::WriteChunk::None,
-                                &mut c.w,
-                            )? {
-                                rc = wire::IOResult::WriteWouldBlock;
-                            }
+                            Self::send_error(id, c, e, &message, &mut rc)?;
                         }
                     }
                 }
@@ -255,25 +278,15 @@ impl Server {
                     let streams = streams_get(&PathBuf::from("./streams"));
                     match streams {
                         Ok(streams) => {
-                            if wire::write_request(
-                                &mut c.c,
+                            Self::send_rpc_no_data(
+                                c,
                                 &wire::Rpc::ArchiveListResp(id, streams),
-                                wire::WriteChunk::None,
-                                &mut c.w,
-                            )? {
-                                rc = wire::IOResult::WriteWouldBlock;
-                            }
+                                &mut rc,
+                            )?;
                         }
                         Err(e) => {
                             let message = format!("During list::streams_get we encountered {}", e);
-                            if wire::write_request(
-                                &mut c.c,
-                                &wire::Rpc::Error(id, message),
-                                wire::WriteChunk::None,
-                                &mut c.w,
-                            )? {
-                                rc = wire::IOResult::WriteWouldBlock;
-                            }
+                            Self::send_error(id, c, e, &message, &mut rc)?;
                         }
                     }
                 }
@@ -282,26 +295,16 @@ impl Server {
                     let config = config::read_config(".", &self.matches);
                     match config {
                         Ok(config) => {
-                            if wire::write_request(
-                                &mut c.c,
+                            Self::send_rpc_no_data(
+                                c,
                                 &wire::Rpc::ArchiveConfigResp(id, config),
-                                wire::WriteChunk::None,
-                                &mut c.w,
-                            )? {
-                                rc = wire::IOResult::WriteWouldBlock;
-                            }
+                                &mut rc,
+                            )?;
                         }
                         Err(e) => {
                             let message =
                                 format!("During wire::Rpc::ArchiveConfig we encountered {}", e);
-                            if wire::write_request(
-                                &mut c.c,
-                                &wire::Rpc::Error(id, message),
-                                wire::WriteChunk::None,
-                                &mut c.w,
-                            )? {
-                                rc = wire::IOResult::WriteWouldBlock;
-                            }
+                            Self::send_error(id, c, e, &message, &mut rc)?;
                         }
                     }
                 }
@@ -312,26 +315,16 @@ impl Server {
 
                     match stream_config {
                         Ok(stream_config) => {
-                            if wire::write_request(
-                                &mut c.c,
+                            Self::send_rpc_no_data(
+                                c,
                                 &wire::Rpc::StreamConfigResp(id, Box::new(stream_config)),
-                                wire::WriteChunk::None,
-                                &mut c.w,
-                            )? {
-                                rc = wire::IOResult::WriteWouldBlock;
-                            }
+                                &mut rc,
+                            )?;
                         }
                         Err(e) => {
                             let message =   //println!("process_read entry!");
                                 format!("During wire::Rpc::StreamConfig we encountered {}", e);
-                            if wire::write_request(
-                                &mut c.c,
-                                &wire::Rpc::Error(id, message),
-                                wire::WriteChunk::None,
-                                &mut c.w,
-                            )? {
-                                rc = wire::IOResult::WriteWouldBlock;
-                            }
+                            Self::send_error(id, c, e, &message, &mut rc)?;
                         }
                     }
                 }
@@ -342,24 +335,48 @@ impl Server {
                     if let Err(e) = stream_files {
                         let message =
                             format!("During wire::Rpc::StreamRetrieve we encountered {}", e);
-                        if wire::write_request(
-                            &mut c.c,
-                            &wire::Rpc::Error(id, message),
-                            wire::WriteChunk::None,
-                            &mut c.w,
-                        )? {
-                            rc = wire::IOResult::WriteWouldBlock;
-                        }
+                        Self::send_error(id, c, e, &message, &mut rc)?;
                     } else {
                         let stream_files = stream_files.unwrap();
-
-                        if wire::write_request(
-                            &mut c.c,
+                        Self::send_rpc_no_data(
+                            c,
                             &wire::Rpc::StreamRetrieveResp(id, stream_files),
-                            wire::WriteChunk::None,
-                            &mut c.w,
-                        )? {
-                            rc = wire::IOResult::WriteWouldBlock;
+                            &mut rc,
+                        )?;
+                    }
+                }
+                wire::Rpc::StreamRetrieveDelta(id, stream_id) => {
+                    self.stats.stream_retrieve_delta += 1;
+
+                    match stream_meta::read_stream_config(&stream_id) {
+                        Ok(config) => {
+                            let stream_entries = stream_meta::stream_map_entries_with_data_lengths(
+                                &mut self.da,
+                                &stream_id,
+                            );
+                            match stream_entries {
+                                Ok(se) => {
+                                    Self::send_rpc_no_data(
+                                        c,
+                                        &wire::Rpc::StreamRetrieveDeltaResp(id, config, se),
+                                        &mut rc,
+                                    )?;
+                                }
+                                Err(e) => {
+                                    let message = format!(
+                                        "wire::Rpc::StreamRetrieveDelta failure for stream {:?}: {}",
+                                        stream_id, e
+                                    );
+                                    Self::send_error(id, c, e, &message, &mut rc)?;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let message = format!(
+                                "wire::Rpc::StreamRetrieveDelta failed to load stream config: {}",
+                                e
+                            );
+                            Self::send_error(id, c, e, &message, &mut rc)?;
                         }
                     }
                 }
@@ -372,14 +389,12 @@ impl Server {
                         let (data, start, end) =
                             self.da.data_get(s.slab, s.offset, s.nr_entries, p).unwrap();
 
-                        if wire::write_request(
-                            &mut c.c,
+                        Self::send_rpc(
+                            c,
                             &wire::Rpc::RetrieveChunkResp(id),
-                            wire::WriteChunk::ArcData(data, start, end),
-                            &mut c.w,
-                        )? {
-                            rc = wire::IOResult::WriteWouldBlock;
-                        }
+                            WriteChunk::ArcData(data, start, end),
+                            &mut rc,
+                        )?;
                     } else {
                         panic!(
                             "expecting RetrieveChunkReq client::IdType::Unpack, got {:?}",
@@ -390,14 +405,12 @@ impl Server {
                 wire::Rpc::CuckooFilterReq => {
                     self.stats.cuckoo_filter_req += 1;
                     let filter = self.da.get_seen();
-                    if wire::write_request(
-                        &mut c.c,
+
+                    Self::send_rpc_no_data(
+                        c,
                         &wire::Rpc::CuckooFilterResp(Box::new(filter)),
-                        wire::WriteChunk::None,
-                        &mut c.w,
-                    )? {
-                        rc = wire::IOResult::WriteWouldBlock;
-                    }
+                        &mut rc,
+                    )?;
                 }
                 _ => {
                     eprint!("What are we not handling! {:?}", d);
@@ -408,26 +421,12 @@ impl Server {
             return Err(anyhow!("Client closed connection"));
         }
 
-        if !found_it.is_empty()
-            && wire::write_request(
-                &mut c.c,
-                &wire::Rpc::HaveDataRespYes(found_it),
-                wire::WriteChunk::None,
-                &mut c.w,
-            )?
-        {
-            rc = wire::IOResult::WriteWouldBlock;
+        if !found_it.is_empty() {
+            Self::send_rpc_no_data(c, &wire::Rpc::HaveDataRespYes(found_it), &mut rc)?;
         }
 
-        if !data_needed.is_empty()
-            && wire::write_request(
-                &mut c.c,
-                &wire::Rpc::HaveDataRespNo(data_needed),
-                wire::WriteChunk::None,
-                &mut c.w,
-            )?
-        {
-            rc = wire::IOResult::WriteWouldBlock;
+        if !data_needed.is_empty() {
+            Self::send_rpc_no_data(c, &wire::Rpc::HaveDataRespNo(data_needed), &mut rc)?;
         }
 
         Ok(rc)

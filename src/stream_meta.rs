@@ -11,8 +11,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::{Builder, TempDir};
 
+use crate::archive::Data;
 use crate::paths;
 use crate::slab::*;
+use crate::stream::MapEntry;
+use crate::stream::MappingUnpacker;
 use crate::wire;
 
 // Assumes we've chdir'd to the archive
@@ -268,6 +271,34 @@ pub fn stream_id_to_stream_files(stream_id: &str) -> Result<Option<wire::StreamF
         stream: stream_data,
         offsets: stream_offset_data,
     }))
+}
+
+pub fn stream_map_entries(stream_id: &str) -> Result<Vec<MapEntry>> {
+    let stream_path = paths::stream_path(stream_id);
+    let mut stream_file = SlabFileBuilder::open(&stream_path).build()?;
+    let nr_slabs = stream_file.get_nr_slabs();
+    let mut rc = Vec::new();
+
+    let mut unpacker = MappingUnpacker::default();
+
+    for s in 0..nr_slabs {
+        let stream_data = stream_file.read(s as u32)?;
+        let (entries, _positions) = unpacker.unpack(&stream_data[..])?;
+        for e in entries.iter() {
+            rc.push(*e);
+        }
+    }
+    Ok(rc)
+}
+
+pub fn stream_map_entries_with_data_lengths(
+    da: &mut Data,
+    stream_id: &str,
+) -> Result<Vec<MapEntry>> {
+    let mut map_entries = stream_map_entries(stream_id)?;
+
+    da.calculate_stream_map_entry_lengths_m(&mut map_entries)?;
+    Ok(map_entries)
 }
 
 pub fn write_stream_config(dir_location: &Path, cfg: &StreamConfig) -> Result<()> {
