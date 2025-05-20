@@ -319,11 +319,6 @@ pub fn now_string() -> String {
     dt.to_rfc3339()
 }
 
-pub fn now() -> String {
-    let dt = Utc::now();
-    dt.to_rfc3339()
-}
-
 pub fn to_date_time(t: &str) -> chrono::DateTime<FixedOffset> {
     DateTime::parse_from_rfc3339(t).unwrap()
 }
