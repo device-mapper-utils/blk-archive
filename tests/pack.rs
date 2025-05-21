@@ -106,4 +106,15 @@ fn pack_random_verify_stats() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn start_stop_service() -> Result<()> {
+    let mut td = TestDir::new()?;
+    let mut archive = create_archive(&mut td, true)?;
+
+    archive.service_start()?;
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    archive.service_end()?;
+    Ok(())
+}
 //-----------------------------------------

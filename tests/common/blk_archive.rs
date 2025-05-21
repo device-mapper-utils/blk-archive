@@ -1,7 +1,9 @@
 use anyhow::Result;
+use duct::unix::HandleExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
 use crate::args;
 use crate::common::process::*;
@@ -11,6 +13,7 @@ use crate::common::targets::*;
 
 pub struct BlkArchive {
     archive: PathBuf,
+    server: Option<duct::Handle>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -44,14 +47,32 @@ impl BlkArchive {
             "--data-compression",
             &compression
         ]))?;
+
         Ok(Self {
             archive: archive.to_path_buf(),
+            server: None,
         })
+    }
+
+    pub fn service_start(&mut self) -> Result<()> {
+        let c = server_cmd(args!["-a", &self.archive]);
+        self.server = Some(run_spawn(c)?);
+        Ok(())
+    }
+
+    pub fn service_end(&mut self) -> Result<ExitStatus> {
+        if let Some(h) = self.server.take() {
+            h.send_signal(2)?;
+            let status = h.wait()?.status;
+            return Ok(status);
+        }
+        Ok(ExitStatus::default())
     }
 
     pub fn from_path(archive: &Path) -> Result<Self> {
         Ok(Self {
             archive: archive.to_path_buf(),
+            server: None,
         })
     }
 

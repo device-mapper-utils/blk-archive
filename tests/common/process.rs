@@ -91,6 +91,11 @@ fn run_raw(command: Command) -> std::io::Result<std::process::Output> {
     command.unchecked().run()
 }
 
+pub fn run_spawn(command: Command) -> std::io::Result<duct::Handle> {
+    let command = command.to_expr().stdout_capture().stderr_capture();
+    command.start()
+}
+
 fn log_output(output: &process::Output) {
     use std::str::from_utf8;
 

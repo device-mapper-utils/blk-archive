@@ -52,4 +52,12 @@ where
     target_cmd("verify", args)
 }
 
+pub fn server_cmd<I>(args: I) -> Command
+where
+    I: IntoIterator,
+    I::Item: Into<OsString>,
+{
+    target_cmd("server", args)
+}
+
 //------------------------------------------
