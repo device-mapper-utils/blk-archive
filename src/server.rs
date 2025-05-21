@@ -492,8 +492,6 @@ impl Server {
                     || item_rdy.events & epoll::Events::EPOLLHUP.bits()
                         == epoll::Events::EPOLLHUP.bits()
                 {
-                    eprintln!("POLLERR");
-
                     let fd_to_remove = item_rdy.data as i32;
                     event.data = fd_to_remove as u64;
                     epoll::ctl(
@@ -536,8 +534,6 @@ impl Server {
                 if item_rdy.events & epoll::Events::EPOLLOUT.bits()
                     == epoll::Events::EPOLLOUT.bits()
                 {
-                    eprintln!("POLLOUT!");
-
                     // We only get here if we got an would block on a write before
                     let fd: i32 = item_rdy.data as i32;
                     let c = clients.get_mut(&fd).unwrap();

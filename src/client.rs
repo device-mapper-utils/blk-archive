@@ -614,7 +614,6 @@ impl Client {
             if rc == wire::IOResult::Exit {
                 break;
             } else if rc == wire::IOResult::WriteWouldBlock {
-                //eprintln!("Enabling POLL out!");
                 Client::_enable_poll_out(event_fd, fd, &mut poll_out)?;
             }
         }
@@ -666,7 +665,7 @@ pub fn one_rpc(server: &str, rpc: wire::Rpc) -> Result<Option<wire::Rpc>> {
 
     let rc = thread_handle.join();
     if rc.is_err() {
-        println!("client worker thread ended with {:?}", rc);
+        eprintln!("client worker thread ended with {:?}", rc);
     }
 
     Ok(response)

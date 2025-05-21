@@ -103,7 +103,7 @@ impl Transport for LocalArchive {
 
 impl RemoteArchive {
     fn new(s_conn: String, so: StreamOrder<Sentry>) -> Result<Self> {
-        println!("Client is connecting to server using {}", s_conn);
+        eprintln!("Client is connecting to server using {}", s_conn);
         let mut client = client::Client::new(s_conn, so)?;
         let rq = client.get_request_queue();
         // Start a thread to handle client communication
@@ -155,7 +155,7 @@ impl Transport for RemoteArchive {
         if let Some(worker) = self.join_handle.take() {
             let rc = worker.join();
             if rc.is_err() {
-                println!("client worker thread ended with {:?}", rc);
+                eprintln!("client worker thread ended with {:?}", rc);
             }
         }
         Ok(())
