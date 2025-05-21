@@ -2,6 +2,8 @@ use anyhow::Result;
 use duct::unix::HandleExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
@@ -90,10 +92,37 @@ impl BlkArchive {
         pack_cmd(args!["-a", &self.archive, &input, "-j"])
     }
 
+    pub fn send_cmd(&self, input: &Path) -> Command {
+        send_cmd(args!["--server", "localhost:9876", &input, "-j"])
+    }
+
+    pub fn receive_cmd(&self, stream_id: &str, output: &Path) -> Command {
+        recv_cmd(args![
+            "--server",
+            "localhost:9876",
+            "-s",
+            stream_id,
+            output,
+            "--create",
+            "-j"
+        ])
+    }
+
     pub fn pack(&self, input: &Path) -> Result<PackResponse> {
         let stdout = run_ok(self.pack_cmd(input))?;
         let response: PackResponse = serde_json::from_str(&stdout)?;
         Ok(response)
+    }
+
+    pub fn send(&self, input: &Path) -> Result<PackResponse> {
+        let stdout = run_ok(self.send_cmd(input))?;
+        let response: PackResponse = serde_json::from_str(&stdout)?;
+        Ok(response)
+    }
+
+    pub fn receive(&self, stream_id: &str, input: &Path) -> Result<()> {
+        let _stdout = run_ok(self.receive_cmd(stream_id, input))?;
+        Ok(())
     }
 
     pub fn unpack_cmd(&self, stream: &str, output: &Path, create: bool) -> Command {
@@ -117,6 +146,35 @@ impl BlkArchive {
         run_ok(self.verify_cmd(input, stream))?;
         Ok(())
     }
+}
+
+impl Drop for BlkArchive {
+    fn drop(&mut self) {
+        self.service_end().unwrap();
+    }
+}
+
+pub fn same_bytes(file1: &Path, file2: &Path) -> Result<bool, std::io::Error> {
+    let f1 = File::open(file1)?;
+    let f2 = File::open(file2)?;
+
+    // Check if file sizes are different
+    if f1.metadata()?.len() != f2.metadata()?.len() {
+        return Ok(false);
+    }
+
+    // Use buf readers since they are much faster
+    let bf1 = BufReader::new(f1);
+    let bf2 = BufReader::new(f2);
+
+    // Do a byte to byte comparison of the two files
+    for (b1, b2) in bf1.bytes().zip(bf2.bytes()) {
+        if b1.unwrap() != b2.unwrap() {
+            return Ok(false);
+        }
+    }
+
+    return Ok(true);
 }
 
 //-----------------------------------------

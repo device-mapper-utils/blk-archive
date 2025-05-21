@@ -45,7 +45,7 @@ loop3=$(losetup -f --show /block3.img)
 
 # Run the cargo based tests
 cd "$START_DIR" || exit 1
-cargo test || exit 1
+cargo test -- --test-threads=1 || exit 1
 
 # Run the dmtest-python tests for blk-archive
 # Unable to run rolling linux test as we don't have enough disk space in the CI VMs.

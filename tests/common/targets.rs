@@ -36,6 +36,22 @@ where
     target_cmd("pack", args)
 }
 
+pub fn send_cmd<I>(args: I) -> Command
+where
+    I: IntoIterator,
+    I::Item: Into<OsString>,
+{
+    target_cmd("send", args)
+}
+
+pub fn recv_cmd<I>(args: I) -> Command
+where
+    I: IntoIterator,
+    I::Item: Into<OsString>,
+{
+    target_cmd("receive", args)
+}
+
 pub fn unpack_cmd<I>(args: I) -> Command
 where
     I: IntoIterator,

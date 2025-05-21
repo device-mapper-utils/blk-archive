@@ -30,6 +30,11 @@ pub fn create_input_file(
     Ok(path)
 }
 
+pub fn create_output_file_name(td: &mut TestDir) -> Result<PathBuf> {
+    let path = td.mk_path("output.bin");
+    Ok(path)
+}
+
 pub fn verify_file(path: &Path, size: u64, seed: u64, pattern: Pattern) -> Result<()> {
     let actual_size = std::fs::metadata(path)?.len();
     if actual_size != size {
