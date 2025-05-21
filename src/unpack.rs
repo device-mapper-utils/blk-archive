@@ -110,9 +110,9 @@ impl Unpacker {
                 amt_written = *len;
             }
             MapEntry::Data(d) | MapEntry::DataWithLen { d, .. } => {
-                if let Some(d) = data {
-                    amt_written = d.len() as u64;
-                    self.dest.handle_mapped(&d[..])?;
+                if let Some(existing_data) = data {
+                    amt_written = existing_data.len() as u64;
+                    self.dest.handle_mapped(&existing_data[..])?;
                 } else {
                     // This is a bit ugly, but removes a data copy
                     let (data, start, end) =
@@ -132,9 +132,9 @@ impl Unpacker {
                 offset,
                 nr_entries,
             } => {
-                if let Some(d) = data {
-                    amt_written = d.len() as u64;
-                    self.dest.handle_mapped(&d[..])?;
+                if let Some(existing_data) = data {
+                    amt_written = existing_data.len() as u64;
+                    self.dest.handle_mapped(&existing_data[..])?;
                 } else {
                     // This is a bit ugly, but removes a data copy
                     let partial = Some((*begin, *end));
