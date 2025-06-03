@@ -934,11 +934,13 @@ impl StreamIter {
     }
 
     fn next_slab(&mut self) -> Result<bool> {
+        // Increment slab before we do bound checks
+        self.slab += 1;
+
         if self.slab >= self.file.get_nr_slabs() as u32 {
             return Ok(false);
         }
 
-        self.slab += 1;
         let entries = Self::read_slab(&mut self.file, self.slab)?;
         self.entries = entries;
         self.index = 0;
