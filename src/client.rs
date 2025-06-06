@@ -653,7 +653,7 @@ pub fn rpc_invoke(rq: &Arc<ClientRequests>, rpc: wire::Rpc) -> Result<Option<wir
 pub fn one_rpc(server: &str, rpc: wire::Rpc) -> Result<Option<wire::Rpc>> {
     let so = StreamOrder::new();
 
-    let mut client = Client::new(server.to_string(), so.clone())?;
+    let mut client = Client::new(server.to_string(), so)?;
     let rq = client.get_request_queue();
     // Start a thread to handle client communication
     let thread_handle = thread::Builder::new()
