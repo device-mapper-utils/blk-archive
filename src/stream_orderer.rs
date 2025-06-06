@@ -16,6 +16,7 @@ pub struct Sentry {
 
 #[derive(Debug)]
 struct Protected<T> {
+    input_done: bool,
     seq_id: u64,
     next: u64,
     ready: BTreeMap<u64, T>,
@@ -49,6 +50,7 @@ where
 {
     pub fn new() -> Self {
         let p = Mutex::new(Protected {
+            input_done: false,
             seq_id: 0,
             next: 0,
             ready: BTreeMap::new(),
@@ -63,6 +65,13 @@ where
         let v = p.seq_id;
         p.seq_id += 1;
         v
+    }
+
+    pub fn input_complete(&mut self) {
+        let (protected, cvar) = &*self.pair;
+        let mut p = protected.lock();
+        p.input_done = true;
+        cvar.notify_all();
     }
 
     pub fn entry_add(&self, item: T) {
@@ -93,7 +102,8 @@ where
     }
 
     fn _complete(p: &Protected<T>) -> bool {
-        p.ready.is_empty() && (p.seq_id == p.next) && p.seq_id > 0
+        p.input_done && p.ready.is_empty() && (p.seq_id == p.next)
+            || (p.ready.is_empty() && (p.seq_id == p.next) && p.seq_id > 0)
     }
 
     pub fn drain(&self, wait: bool) -> (Vec<T>, bool) {

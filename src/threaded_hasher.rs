@@ -79,6 +79,11 @@ impl ThreadedHasher {
         self.queue.drain(wait)
     }
 
+    pub fn input_complete(&mut self) -> Result<()> {
+        self.queue.input_complete();
+        Ok(())
+    }
+
     pub fn handle_all_outstanding(&self, handler: &mut impl IoVecHandler) -> Result<()> {
         loop {
             let (process, done) = self.drain(true);
