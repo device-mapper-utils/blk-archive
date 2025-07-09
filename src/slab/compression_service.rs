@@ -115,7 +115,7 @@ fn compression_worker_<C: Compressor>(
             let compressed_data = match compressor.compress(&data.data) {
                 Ok(data) => data,
                 Err(e) => {
-                    let _ = error_tx.send(e.into());
+                    let _ = error_tx.send(e);
                     continue;
                 }
             };

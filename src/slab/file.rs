@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use crate::hash::*;
@@ -84,7 +85,7 @@ impl Drop for SlabFile {
 fn write_slab(shared: &Arc<Mutex<SlabShared>>, data: &[u8]) -> Result<()> {
     assert!(!data.is_empty());
 
-    let mut shared = shared.lock().unwrap();
+    let mut shared = shared.lock();
 
     let offset = shared.file_size;
     shared.offsets.offsets.push(offset);
@@ -216,7 +217,9 @@ impl SlabFile {
 
         let tid = {
             let shared = shared.clone();
-            thread::spawn(move || writer(shared, rx))
+            thread::Builder::new()
+                .name("SlabFile::create (writer)".to_string())
+                .spawn(move || writer(shared, rx))?
         };
 
         Ok(Self {
@@ -266,7 +269,9 @@ impl SlabFile {
 
         let tid = {
             let shared = shared.clone();
-            thread::spawn(move || writer(shared, rx))
+            thread::Builder::new()
+                .name("SlabFile::open_for_write (writer)".to_string())
+                .spawn(move || writer(shared, rx))?
         };
 
         Ok(Self {
@@ -325,13 +330,13 @@ impl SlabFile {
             tid.join().expect("join failed");
         }
 
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock();
         shared.offsets.write_offset_file(&self.offsets_path)?;
         Ok(())
     }
 
     pub fn read_(&mut self, slab: u32) -> Result<Vec<u8>> {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
 
         let offset = shared.offsets.offsets[slab as usize];
         shared.data.seek(SeekFrom::Start(offset))?;
@@ -394,12 +399,12 @@ impl SlabFile {
     }
 
     pub fn get_nr_slabs(&self) -> usize {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock();
         shared.offsets.offsets.len()
     }
 
     pub fn get_file_size(&self) -> u64 {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock();
         shared.file_size
     }
 
