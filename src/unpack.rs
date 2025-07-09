@@ -200,7 +200,7 @@ impl Unpacker {
             let rc = entry_thread.join();
             if rc.is_err() {
                 no_errors = false;
-                eprintln!("Entry thread exited with {:?}", rc);
+                eprintln!("Entry thread exited with {rc:?}");
             }
 
             // End the socket thread
@@ -209,7 +209,7 @@ impl Unpacker {
             let rc = socket_thread.join();
             if rc.is_err() {
                 no_errors = false;
-                eprintln!("Socket client thread exited with {:?}", rc);
+                eprintln!("Socket client thread exited with {rc:?}");
             }
         } else {
             let mut stream_file = SlabFileBuilder::open(&self.stream_file).build()?;
@@ -557,7 +557,7 @@ fn _retrieve_stream(
         let t = data.unwrap();
         Ok((t.stream, t.offsets))
     } else {
-        panic!("We received the wrong response {:?} !", rc);
+        panic!("We received the wrong response {rc:?} !");
     }
 }
 
@@ -571,7 +571,7 @@ fn _retrieve_stream_config(
     if let wire::Rpc::StreamConfigResp(_id, config) = rc {
         Ok(*config)
     } else {
-        panic!("We received the wrong response {:?} !", rc);
+        panic!("We received the wrong response {rc:?} !");
     }
 }
 
@@ -582,13 +582,13 @@ fn create_open_output(create: bool, output_file: &Path) -> Result<File> {
             .write(true)
             .create_new(true)
             .open(output_file)
-            .context(format!("Couldn't create output file: {:?}", output_file))?
+            .context(format!("Couldn't create output file: {output_file:?}"))?
     } else {
         fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(output_file)
-            .context(format!("Couldn't open output file: {:?}", output_file))?
+            .context(format!("Couldn't open output file: {output_file:?}"))?
     };
     Ok(output)
 }
@@ -664,10 +664,7 @@ pub fn run_receive(matches: &ArgMatches, screen: Arc<Output>) -> Result<()> {
     let stream_dir = td.path().join(stream_id);
     let stream_file = stream_dir.join("stream");
     let stream_file_offsets = stream_dir.join("stream.offsets");
-    let e_msg = format!(
-        "Error creating the local tmp. stream directory {:?}",
-        stream_dir
-    );
+    let e_msg = format!("Error creating the local tmp. stream directory {stream_dir:?}");
     fs::create_dir_all(stream_dir).context(e_msg)?;
 
     // Get archive config from server side to retrieve the memory cache size

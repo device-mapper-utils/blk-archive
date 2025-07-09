@@ -265,10 +265,10 @@ impl Packer {
         } else {
             self.output
                 .report
-                .info(&format!("elapsed          : {}", elapsed));
+                .info(&format!("elapsed          : {elapsed}"));
             self.output
                 .report
-                .info(&format!("stream id        : {}", stream_id));
+                .info(&format!("stream id        : {stream_id}"));
             self.output.report.info(&format!(
                 "file size        : {:.2}",
                 Size(handler.stats.size)
@@ -299,7 +299,7 @@ impl Packer {
             ));
             self.output
                 .report
-                .info(&format!("ratio            : {:.2}", ratio));
+                .info(&format!("ratio            : {ratio:.2}"));
             self.output.report.info(&format!(
                 "speed            : {:.2}/s",
                 Size((total_read as f64 / elapsed) as u64)
@@ -423,7 +423,7 @@ fn thin_delta_packer(
                 }
             }
             Err(e) => {
-                let msg = format!("error while retrieving delta stream meta data & stream map entries, server {} error {}", server, e);
+                let msg = format!("error while retrieving delta stream meta data & stream map entries, server {server} error {e}");
                 return Err(anyhow!(msg));
             }
         }

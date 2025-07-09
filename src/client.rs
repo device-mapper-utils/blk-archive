@@ -434,7 +434,7 @@ impl Client {
                                 }
                             }
                         } else {
-                            panic!("How does this happen? {}", id);
+                            panic!("How does this happen? {id}");
                         }
                     }
                 }
@@ -510,11 +510,11 @@ impl Client {
                     self.cuckoo_req_outstanding = false;
                 }
                 wire::Rpc::Error(_id, msg) => {
-                    eprintln!("Unexpected error, server reported: {}", msg);
+                    eprintln!("Unexpected error, server reported: {msg}");
                     process::exit(2);
                 }
                 _ => {
-                    panic!("What are we not handling! {:?}", d);
+                    panic!("What are we not handling! {d:?}");
                 }
             }
             r.rezero();
@@ -579,7 +579,7 @@ impl Client {
                     let read_result = self.process_read(&mut r, &mut w);
                     match read_result {
                         Err(e) => {
-                            eprintln!("Error on read, exiting! {:?}", e);
+                            eprintln!("Error on read, exiting! {e:?}");
                             return Err(e);
                         }
                         Ok(r) => {
@@ -626,7 +626,7 @@ impl Client {
         self.req_q.thread_exited();
 
         if let Err(e) = result {
-            eprintln!("Client runner errored: {}", e);
+            eprintln!("Client runner errored: {e}");
             return Err(e);
         }
 
@@ -665,7 +665,7 @@ pub fn one_rpc(server: &str, rpc: wire::Rpc) -> Result<Option<wire::Rpc>> {
 
     let rc = thread_handle.join();
     if rc.is_err() {
-        eprintln!("client worker thread ended with {:?}", rc);
+        eprintln!("client worker thread ended with {rc:?}");
     }
 
     Ok(response)

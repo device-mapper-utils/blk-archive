@@ -164,7 +164,7 @@ impl Server {
         message_prefix: &str,
         rc: &mut wire::IOResult,
     ) -> Result<wire::IOResult> {
-        let message = format!("{}{}", message_prefix, error);
+        let message = format!("{message_prefix}{error}");
 
         if wire::write_request(
             &mut c.c,
@@ -266,8 +266,7 @@ impl Server {
                         }
                         Err(e) => {
                             let message = format!(
-                                "During stream write id={} for stream = {} we encountered {}",
-                                id, packed_path, e
+                                "During stream write id={id} for stream = {packed_path} we encountered {e}"
                             );
                             Self::send_error(id, c, e, &message, &mut rc)?;
                         }
@@ -285,7 +284,7 @@ impl Server {
                             )?;
                         }
                         Err(e) => {
-                            let message = format!("During list::streams_get we encountered {}", e);
+                            let message = format!("During list::streams_get we encountered {e}");
                             Self::send_error(id, c, e, &message, &mut rc)?;
                         }
                     }
@@ -303,7 +302,7 @@ impl Server {
                         }
                         Err(e) => {
                             let message =
-                                format!("During wire::Rpc::ArchiveConfig we encountered {}", e);
+                                format!("During wire::Rpc::ArchiveConfig we encountered {e}");
                             Self::send_error(id, c, e, &message, &mut rc)?;
                         }
                     }
@@ -323,7 +322,7 @@ impl Server {
                         }
                         Err(e) => {
                             let message =   //println!("process_read entry!");
-                                format!("During wire::Rpc::StreamConfig we encountered {}", e);
+                                format!("During wire::Rpc::StreamConfig we encountered {e}");
                             Self::send_error(id, c, e, &message, &mut rc)?;
                         }
                     }
@@ -334,7 +333,7 @@ impl Server {
 
                     if let Err(e) = stream_files {
                         let message =
-                            format!("During wire::Rpc::StreamRetrieve we encountered {}", e);
+                            format!("During wire::Rpc::StreamRetrieve we encountered {e}");
                         Self::send_error(id, c, e, &message, &mut rc)?;
                     } else {
                         let stream_files = stream_files.unwrap();
@@ -364,8 +363,7 @@ impl Server {
                                 }
                                 Err(e) => {
                                     let message = format!(
-                                        "wire::Rpc::StreamRetrieveDelta failure for stream {:?}: {}",
-                                        stream_id, e
+                                        "wire::Rpc::StreamRetrieveDelta failure for stream {stream_id:?}: {e}"
                                     );
                                     Self::send_error(id, c, e, &message, &mut rc)?;
                                 }
@@ -373,8 +371,7 @@ impl Server {
                         }
                         Err(e) => {
                             let message = format!(
-                                "wire::Rpc::StreamRetrieveDelta failed to load stream config: {}",
-                                e
+                                "wire::Rpc::StreamRetrieveDelta failed to load stream config: {e}"
                             );
                             Self::send_error(id, c, e, &message, &mut rc)?;
                         }
@@ -397,8 +394,7 @@ impl Server {
                         )?;
                     } else {
                         panic!(
-                            "expecting RetrieveChunkReq client::IdType::Unpack, got {:?}",
-                            op_type
+                            "expecting RetrieveChunkReq client::IdType::Unpack, got {op_type:?}"
                         );
                     }
                 }
@@ -413,7 +409,7 @@ impl Server {
                     )?;
                 }
                 _ => {
-                    eprint!("What are we not handling! {:?}", d);
+                    eprint!("What are we not handling! {d:?}");
                 }
             }
             c.bm.rezero();
@@ -472,7 +468,7 @@ impl Server {
                     && item_rdy.data == listen_fd as u64
                 {
                     let (new_client, addr) = self.listener.accept()?;
-                    println!("We accepted a connection from {}", addr);
+                    println!("We accepted a connection from {addr}");
                     let fd = new_client.as_raw_fd();
 
                     event = ipc::read_event(fd);
@@ -513,7 +509,7 @@ impl Server {
                     let result = self.process_read(s);
                     match result {
                         Err(e) => {
-                            println!("Client removed: {}", e);
+                            println!("Client removed: {e}");
                             clients.remove(&fd);
                         }
                         Ok(r) => {

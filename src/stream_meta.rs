@@ -24,7 +24,7 @@ fn new_stream_path_(rng: &mut ChaCha20Rng) -> Result<Option<(String, PathBuf)>> 
     let n: u64 = rng.gen();
 
     // turn this into a path
-    let name = format!("{:>016x}", n);
+    let name = format!("{n:>016x}");
     let path: PathBuf = ["streams", &name].iter().collect();
 
     if path.exists() {
@@ -265,7 +265,7 @@ pub fn stream_id_to_stream_files(stream_id: &str) -> Result<Option<wire::StreamF
 
     let stream_data = stream_data.unwrap();
     let stream_offset_data = fs::read(paths::stream_path_offsets(stream_id))
-        .context(format!("stream index not found for {}", stream_id))?;
+        .context(format!("stream index not found for {stream_id}"))?;
 
     Ok(Some(wire::StreamFiles {
         stream: stream_data,
