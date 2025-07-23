@@ -1,0 +1,205 @@
+.TH BLK-ARCHIVE 1 "July 2025" "blk-archive" "User Commands"
+.SH NAME
+blk-archive - deduplicated archiving for block devices and files
+
+.SH SYNOPSIS
+.B blk-archive
+[OPTIONS] <COMMAND>
+
+.SH DESCRIPTION
+.B blk-archive
+is a tool for archiving block devices and individual files. It works especially well with thin provisioned device-mapper targets. It supports deduplication, delta compression, and efficient unpacking.
+
+.SH OPTIONS
+.TP
+.B -j, --json
+Output in JSON format.
+.TP
+.B -h, --help
+Display help information.
+.TP
+.B -V, --version
+Show version information.
+
+.SH COMMANDS
+.TP
+.B create
+Create a new archive.
+.RS
+.B Usage:
+blk-archive create [OPTIONS] --archive 
+.PP
+Options:
+.TP
+\fB-a, --archive \fR
+Specify archive directory.
+.TP
+\fB-j, --json\fR
+Output JSON.
+.TP
+\fB--block-size <BLOCK_SIZE>\fR
+Specify average block size for deduplication.
+.TP
+\fB--hash-cache-size-meg <HASH_CACHE_SIZE_MEG>\fR
+Memory for caching hash entries.
+.TP
+\fB--data-cache-size-meg <DATA_CACHE_SIZE_MEG>\fR
+Memory for caching data.
+.TP
+\fB--data-compression <y|n>\fR
+Enable/disable slab data compression. Default: y.
+.RE
+
+.TP
+.B pack
+Pack a stream into the archive.
+.RS
+.B Usage:
+blk-archive pack [OPTIONS] --archive  
+.PP
+Arguments:
+.TP
+\fB\fR
+Device or file to archive.
+.PP
+Options:
+.TP
+\fB-a, --archive \fR
+Specify archive directory. [env: BLK_ARCHIVE_DIR=]
+.TP
+\fB-j, --json\fR
+Output JSON.
+.TP
+\fB--delta-stream <DELTA_STREAM>\fR
+Use a stream with an older version for delta compression.
+.TP
+\fB--delta-device <DELTA_DEVICE>\fR
+Use a device with an older version for delta compression.
+.TP
+\fB--data-cache-size-meg \fR
+Cache size for data.
+.RE
+
+.TP
+.B unpack
+Unpack a stream from the archive.
+.RS
+.B Usage:
+blk-archive unpack [OPTIONS] --archive  --stream  
+.PP
+Arguments:
+.TP
+\fB\fR
+Destination device or file.
+.PP
+Options:
+.TP
+\fB--create\fR
+Create a new file instead of overwriting.
+.TP
+\fB-j, --json\fR
+Output JSON.
+.TP
+\fB--data-cache-size-meg \fR
+Cache size for data.
+.TP
+\fB-a, --archive \fR
+Specify archive directory. [env: BLK_ARCHIVE_DIR=]
+.TP
+\fB-s, --stream \fR
+Stream to unpack.
+.RE
+
+.TP
+.B verify
+Verify archived stream against a device/file.
+.RS
+.B Usage:
+blk-archive verify [OPTIONS] --archive  --stream  
+.PP
+Arguments:
+.TP
+\fB\fR
+Device or file with the correct data.
+.PP
+Options:
+.TP
+\fB--data-cache-size-meg \fR
+Cache size for data.
+.TP
+\fB-j, --json\fR
+Output JSON.
+.TP
+\fB-a, --archive \fR
+Specify archive directory. [env: BLK_ARCHIVE_DIR=]
+.TP
+\fB-s, --stream \fR
+Stream to verify.
+.RE
+
+.TP
+.B dump-stream
+Development tool: inspect stream instructions.
+.RS
+.B Usage:
+blk-archive dump-stream [OPTIONS] --archive  --stream 
+.PP
+Options:
+.TP
+\fB-a, --archive \fR
+Specify archive directory.
+.TP
+\fB-j, --json\fR
+Output JSON.
+.TP
+\fB-s, --stream \fR
+Stream to inspect.
+.RE
+
+.TP
+.B list
+List streams in an archive.
+.RS
+.B Usage:
+blk-archive list [OPTIONS] --archive 
+.PP
+Options:
+.TP
+\fB-a, --archive \fR
+Specify archive directory.
+.TP
+\fB-j, --json\fR
+Output JSON.
+.RE
+
+.SH ENVIRONMENT
+.TP
+\fBBLK_ARCHIVE_DIR\fR
+Used as the default archive directory if --archive is not specified.
+
+.SH EXAMPLES
+.TP
+Create a new archive:
+blk-archive create --archive /archives/my-archive
+.TP
+Pack a device:
+blk-archive pack --archive /archives/my-archive /dev/sdx
+.TP
+Unpack a stream to a file:
+blk-archive unpack --archive /archives/my-archive --stream 001 out.img
+.TP
+Verify data integrity:
+blk-archive verify --archive /archives/my-archive --stream 001 /dev/sdx
+
+.SH AUTHOR
+Joe Thornber
+
+.SH REPORTING BUGS
+Issues should be reported at:
+https://github.com/device-mapper-utils/blk-archive/issues
+
+.SH SEE ALSO
+.BR man (1),
+
+
+
