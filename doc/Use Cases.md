@@ -1,243 +1,342 @@
-# Create a new archive
-An archive is a collection of files stored under a root directory.  All the tools will need to be given this root directory using the -a command switch.
+# blk-archive Use Cases
 
-To create a new archive use the *create* sub command with the -a switch.  The directory specified must not exist; create will create it and setup files within.
+## Create a new archive
 
-> blk-archive create -a my-archive
+**Scenario:**
+You want to initialize a new archive directory where blk-archive will store deduplicated and compressed data.
 
-Each archive has a *block-size* associated with it.  When deduplicating data blk-archive will chop the input up into blocks and then see if it's seen that block before.  The *block-size* parameter specifies the _average_ block size for these blocks.
+**Goal:**
+Set up a root directory for an archive with an appropriate block size.
 
-There is an overhead associated with storing every block in the system (~37 bytes).
+**Solution with blk-archive:**
+Use the `create` subcommand with the `-a` switch. The directory should not exist beforehand; it will be created by blk-archive. Optionally, specify a block size (rounded to nearest power of two). Smaller block sizes improve deduplication but increase metadata overhead.
 
-Smaller block sizes increase the probability of finding duplicate data, but increase the space overhead, and reduce performance slightly.
-
-The default block size is 4096, if in doubt leave it as this.  You probably only want to go lower than this if you are intending to store small amounts of data in the system (eg, < 1T).
-
-> blk-archive create -a my-archive --block-size 8092
-
-The block size will always get rounded up to a power of two.
-
-# Add a large file to an archive
-> blk-archive pack -a my-archive my-file
-
-The *pack* sub command adds a file to an archive.  The file will be deduplicated then compressed.  Finally the compressed data will be reconstructed to verify the process.
-
-blk-archive is really designed for archiving data on devices.  It will do files
-
-Various statistics will be printed out at the end of the operation:
-
-> blk-archive pack -a test-achive linux-v5.0.tar
-
-```
-stream id        : 30973e06100eb1d7
-file size        : 823.31M
-mapped size      : 823.31M
-fills size       : 20.79K
-duplicate data   : 21.16M
-data written     : 154.46M
-hashes written   : 8.43M
-stream written   : 5.16K
-compression      : 19.79%
-speed            : 125.43M/s
+**Example commands:**
+```bash
+blk-archive create -a my-archive
+blk-archive create -a my-archive --block-size 8092
 ```
 
-- stream id; This is a unique identifier for the packed stream.  You will need this in order to restore this stream later.
-- file size; the size of the original, uncompressed file.
-- mapped size; if this was a thin device then not all of it may contain data.  In this case it's totally mapped, so the mapped size and file size are identical.
-- fills size; how much of the file was filled with repeating bytes.  Such as a run of 1000 zeroes.
-- duplicate data;  How much of the data was found to be already in the archive.  In this case we are dealing with an empty archive so the only duplicate data we will find will be from within the file itself.  We find only 27 meg.
-- data written; This is how much compressed data was written to the archive.
-- hashes written; Each block written has a 256 bit hash associated with it that we use for deduplication.  These hashes can take up considerable space for large archives.
-- stream written; This is the metadata for the stream.  Generally it will be very small compared to the data written.
-- compression; (mapped size) / (data written + hashes written + stream written)
-- speed; how quickly we compressed the file
+An archive is composed of a directory with multiple sub directories and files.
 
-If we pack a similar file into this archive we should see the deduplication in action:
-
-> blk-archive pack -a test-archive linux-v5.1.tar
-
-```
-stream id        : 0acabdfa1dfb98a7
-file size        : 831.28M
-mapped size      : 831.28M
-fills size       : 20.99K
-duplicate data   : 408.43M
-data written     : 87.50M
-hashes written   : 4.06M
-stream written   : 44.32K
-compression      : 11.02%
-speed            : 122.39M/s
-```
-Note we found 408M of data that was already in the system.  Causing us to write only 87M of data for this file (after compression).
-
-
-To demonstrate the effect of block size on data deduplication let's repeat the above with a block size of just 256 bytes (only recommended for small archives).
-
-> blk-archive create -a test-archive --block-size 256
-
-> blk-archive pack -a test-archive linux-v5.0.tar
-
-```
-stream id        : 25eaa5f7631a1fd5
-file size        : 823.31M
-mapped size      : 823.31M
-fills size       : 2.65M
-duplicate data   : 55.47M
-data written     : 151.39M
-hashes written   : 108.54M
-stream written   : 287.63K
-compression      : 31.61%
-speed            : 76.65M/s
+```bash
+tree my-archive/
+my-archive/
+├── data
+│   ├── data
+│   ├── data.offsets
+│   ├── hashes
+│   └── hashes.offsets
+├── dm-archive.yaml
+├── indexes
+│   ├── seen
+│   └── seen.offsets
+└── streams
 ```
 
-We wrote many more hashes, slowed down archiving speed, and achieved worse compression.
+## Add a large file to an archive
 
-But we get a pay off when we try and pack similar data:
+**Scenario:**
+You want to store a large file efficiently, reducing storage via deduplication and compression.
 
->blk-archive pack -a test-archive linux-v5.1.tar
+**Goal:**
+Deduplicate and compress file data and pack it into an archive.
 
-```
-stream id        : ac72aceac23c8930
-file size        : 831.28M
-mapped size      : 831.28M
-fills size       : 2.71M
-duplicate data   : 745.80M
-data written     : 14.09M
-hashes written   : 10.52M
-stream written   : 506.52K
-compression      : 3.02%
-speed            : 64.76M/s
- ```
+**Solution with blk-archive:**
+Use the `pack` subcommand. Statistics will be shown to understand compression and deduplication effectiveness along with some other data (subject to change before release 1.0).
 
-Now we find 745M of duplicate data out of 831M, and compress the input file down to 3% of it's original size.  Notice how the hashes written is taking up almost as much space as the data written.
+**Example command:**
 
-# Add a non-live block device to an archive
-Adding a block device to an archive is identical to adding a file.  Just specify the path to the device.  You will also need permissions to read the block device.
-
-*The block device must not be in use*.  For instance, you cannot archive a block device that contains a mounted filesystem (later recipes will describe how to get round this using lvm snapshots or thin snapshots).
-
->blk-archive pack -a test-archive /dev/my-vg/my-lv 
-
-# Use lvm old snapshot to archive a live block device
-Get input from ZK
-
-# Add a thin device to an archive
-Invoking packing of a thin device is identical to packing any other device:
-
-> blk-archive pack -a test-archive /dev/my-vg/my-thin-lv
-
-However under the hood blk-archive is aware that this device is a thin device.  It will therefore take a metadata snapshot of the pool, and scan the pool's metadata to ascertain which parts of the thin device have been provisioned.  Only these provisioned regions are read, potentially saving much time.
-
-```
-stream id        : 637daeec766b537d
-file size        : 100G
-mapped size      : 5.47G
-fills size       : 611.72M
-duplicate data   : 93.65M
-data written     : 3.72G
-hashes written   : 51.05M
-stream written   : 66.73K
-compression      : 68.94%
-speed            : 133.31M/s
-```
-Here I'm packing a 100G block device that contains an ext4 filesystem.  The filesystem just has the linux kernel git repo on it.
-
-You can see that we only packed 5.47G of data rather than the full 100G.  Compression was poor (69%) because most of the data in a git repo is already compressed.
-
-# Use a thin snapshot to archive a live thin device
-If you want to archive a thin device but it's in use, you can simply take a thin snapshot:
-
->lvcreate -s --name v5.1 test-vg/kernel-builds
->lvchange -ay -Ky test-vg/v5.1
-
-The first *lvm* command creates the snapshot, the second activates it.
-
-Now we're going to use the archive from the previous recipe.  Our thin snapshot contains the filesystem with the linux git repo on it.  The only difference from before being it has version v5.1 checked out rather than v5.0.
-
->blk-archive pack -a test-archive /dev/test-vg/v5.1
-
-```
-stream id        : 1cb9b909497af41d
-file size        : 100G
-mapped size      : 5.47G
-fills size       : 588.12M
-duplicate data   : 4.85G
-data written     : 4.02M
-hashes written   : 447.05K
-stream written   : 69.93K
-compression      : 0.08%
-speed            : 134.90M/s
+```bash
+blk-archive pack -a my-archive /tmp/test_file.bin
+Packing /tmp/test_file.bin ... [                                        ] Remaining 0s
+elapsed          : 1.033
+stream id        : ba83f083d6628555
+file size        : 1G
+mapped size      : 1G
+total read       : 1G
+fills size       : 482.74M
+duplicate data   : 446.88M
+data written     : 94.38M
+stream written   : 541
+ratio            : 10.85
+speed            : 991.29M/s
 ```
 
-Lot's of duplicate data is found so we only wrote ~4.5M of new data to the archive.
+## Add a non-live block device to an archive
 
-Once the pack is complete the snapshot can be deleted:
+**Scenario:**
+You want to archive the contents of a block device that is currently unused (not mounted).
 
->lvremove -y /dev/test-vg/v5.1
+**Goal:**
+Safely archive a block device by reading its content directly.
 
-# Add a thin snapshot of a dev that is already in the archive
-Packing a new stream to an archive can be greatly sped up if you've already packed a snapshot of the device before.
+**Solution with blk-archive:**
+Use `pack` just as you would do with a file.
 
-> blk-archive unpack -a test-archive /dev/test-vg/v5.1 --delta-stream c11471f971310751 --delta-device /dev/test-vg/v5.0
-
-Here we've already packed a snapshot called 'v5.0'.  We need to provide the path to the previously packed device (/dev/test-vg/v5.0).  This prior device must _not_ have been changed since it was packed.  We also provide the id of the stream within the archive.
-
-Once the new snapshot (v5.1) has been packed we can delete the v5.0 snapshot and use the v5.1 snapshot for the next incremental backup.
-
-
-# List streams in an archive
-You can get a list of the streams that are in an archive using the *list* sub command:
-
->blk-archive list
-
-```
-cb917ad6b2bd1d7a  863303680 Mar 30 22 12:43 linux-v5.0.tar
-53bfa67a08ba4342  871659520 Mar 30 22 12:43 linux-v5.1.tar
-67d4b14604f7015c  871229440 Mar 30 22 12:43 linux-v5.2.tar
-c11471f971310751  913336320 Mar 30 22 12:44 linux-v5.3.tar
-4869608e5c757fb5  938137600 Mar 30 22 12:44 linux-v5.4.tar
-d506b039bc99cd48  947691520 Mar 30 22 12:44 linux-v5.5.tar
-5c5577a3e22665cb  957614080 Mar 30 22 12:45 linux-v5.6.tar
-5f254e7b9132f3f5  965775360 Mar 30 22 12:45 linux-v5.7.tar
-b5dca148918a6489  983869440 Mar 30 22 12:45 linux-v5.8.tar
-0317a7046c72933b 1011015680 Mar 30 22 12:46 linux-v5.9.tar
-5166cc67bffd870e 1019238400 Mar 30 22 12:46 linux-v5.10.tar
-0d381b658b8d780a 1064212480 Mar 30 22 12:47 linux-v5.11.tar
-6ffe73350b4f042a 1070315520 Mar 30 22 12:47 linux-v5.12.tar
-a138c1aef20fd1bd 1091778560 Mar 30 22 12:47 linux-v5.13.tar
+**Example command:**
+```bash
+blk-archive pack -a my-archive /dev/ublkb1
+Packing /dev/ublkb1 ... [                                        ] Remaining 0s
+elapsed          : 795.734
+stream id        : 2b3985ef2ec276eb
+file size        : 931.32G
+mapped size      : 931.32G
+total read       : 931.32G
+fills size       : 891.73G
+duplicate data   : 34.56G
+data written     : 5.03G
+stream written   : 2.94K
+ratio            : 185.07
+speed            : 1.17G/s
 ```
 
-Each line describes a stream (a packed file or device).  There are four fields on each line:
-- The stream unique identifier.  You will need this to unpack the stream at a later date.
-- The size of the original file/device.
-- The time it was placed in the archive.
-- The basename of file/device.  In this case I was just packing linux tar files again.
+## Use LVM snapshot to archive a live block device
 
-# Restore to a file
-To restore a stream you need to use the *unpack* sub command, along with the --create switch.
+**Scenario:**
+You need to archive a block device that is currently in use.
 
->blk-archive unpack -a test-archive --stream c11471f971310751 --create new-file
+**Goal:**
+Capture a consistent snapshot of the live device and archive it without unmounting.
 
-You specify the stream using it's unique identifier.  The positional argument is the destination.  
+**Solution with blk-archive:**
+Use LVM to create a snapshot and archive the snapshot device.  The snapshot needs to be inactive
+before adding it to the archive.
 
-# Restore to a block device
-Restoring to a block device, or a pre-existing file for that matter, is just the same as above except you omit the --create switch.
+**Example commands:**
+```bash
+lvcreate -s --name snap1 --size 512M my-vg/my-thick-volume
+blk-archive pack -a my-archive /dev/my-vg/snap1
+Packing /dev/dm-8 ... [                                        ] Remaining 0s
+elapsed          : 1.099
+stream id        : 689a120cd415c0f7
+file size        : 1G
+mapped size      : 1G
+total read       : 1G
+fills size       : 1021.78M
+duplicate data   : 0
+data written     : 2.22M
+stream written   : 78
+ratio            : 461.36
+speed            : 931.76M/s
+```
 
->blk-archive unpack -a test-archive --stream c11471f971310751 /dev/test-vg/v5.0-restored
+## Add an inactive thin device to an archive
 
-The destination must exist, and be the same size as the stream.
+**Scenario:**
+You are archiving a thinly provisioned device, e.g., from a thin LVM pool that is inactive.
 
-# Restore to a thin device
-Invoking a restore to a thin device is identical to any other block device.  However, blk-archive will read the mappings of the thin device and attempt to maximise data sharing within the pool.
-- provisioned areas of the thin device that are unprovisioned in the stream will be discarded to unprovisioned them.
-- before writing to a provisioned region blk-archive will check that it doesn't already contain identical data, and omit the write if so.  This avoids breaking sharing.
+**Goal:**
+Efficiently archive only provisioned regions of a thin device.
 
-FIXME: come up with some good examples.  This is a killer feature so make sure it's compelling.
+**Solution with blk-archive:**
+blk-archive detects thin devices and reads only mapped areas, saving time and space.
 
-# Deleting a stream from an archive
-You cannot delete a stream from an archive.  If you have an archive that contains many streams that you no longer want, then you should create a new archive and migrate the stream you wish to keep across to them.
+**Example commands:**
+```bash
+blk-archive pack -a my-archive /dev/my-vg/my-thin-volume
+elapsed          : 0.067
+stream id        : 3b9beb432a83a142
+file size        : 1G
+mapped size      : 64.69M
+total read       : 64.69M
+fills size       : 64.31M
+duplicate data   : 0
+data written     : 390.77K
+stream written   : 111
+ratio            : 169.46
+speed            : 965.49M/s
+```
 
-# Migrating streams to a new archive
-FIXME: finish
+## Use a thin snapshot to archive a live thin device
 
-Use daily/monthly rolling snaps as example
+**Scenario:**
+You want to archive a thin device that is actively used.
+
+**Goal:**
+Create a snapshot of the device and archive its state with minimal new data written.
+
+**Solution with blk-archive:**
+Use `lvcreate` to snapshot the device. Then archive the snapshot using `pack`.
+
+**Example commands:**
+```bash
+lvcreate -s --name base-line my-vg/my-thin-volume
+  Logical volume "base-line" created.
+
+lvchange -ay -Ky my-vg/base-line
+
+blk-archive pack -a my-archive /dev/my-vg/base-line
+elapsed          : 0.079
+stream id        : b53d6b40b692f645
+file size        : 1G
+mapped size      : 64.69M
+total read       : 64.69M
+fills size       : 62.28M
+duplicate data   : 390.77K
+data written     : 2.03M
+stream written   : 123
+ratio            : 31.89
+speed            : 818.83M/s
+
+lvremove -y /dev/my-vg/base-line
+  Logical volume "base-line" successfully removed.
+```
+
+## Add a thin snapshot of a device already in the archive
+
+**Scenario:**
+You have archived a previous version of a device and now want to archive a newer snapshot efficiently.
+
+**Goal:**
+Use delta encoding to avoid storing duplicated data from a previously archived snapshot.
+
+**Solution with blk-archive:**
+Use `pack` and provide the previous stream ID and device path to enable delta mode.
+
+**Example commands:**
+```bash
+blk-archive pack -a my-archive /dev/my-vg/delta-ss-second  --delta-stream 3d1444b0baa4a1e1 --delta-device /dev/my-vg/delta-ss-initial
+elapsed          : 0.101
+stream id        : 7cd3daf2d6062d40
+file size        : 1G
+mapped size      : 64.69M
+total read       : 98.06M
+fills size       : 97.71M
+duplicate data   : 160K
+data written     : 202.60K
+stream written   : 151
+ratio            : 326.71
+speed            : 970.92M/s
+```
+
+## List streams in an archive
+
+**Scenario:**
+You want to see which files or devices have been archived.
+
+**Goal:**
+List all the streams stored in the archive along with metadata.
+
+**Solution with blk-archive:**
+Use the `list` subcommand.
+
+**Example command:**
+```bash
+blk-archive list -a my-archive
+689a120cd415c0f7 1073741824 Jul 29 25 14:18 snap1
+3b9beb432a83a142 1073741824 Jul 29 25 14:22 my-thin-volume
+b53d6b40b692f645 1073741824 Jul 29 25 14:45 base-line
+3d1444b0baa4a1e1 1073741824 Jul 29 25 14:50 delta-ss-initial
+7cd3daf2d6062d40 1073741824 Jul 29 25 14:56 delta-ss-second
+```
+
+## Restore to a file
+
+**Scenario:**
+You want to recover a previously archived file to a new destination.
+
+**Goal:**
+Restore data from a stream using its unique ID.
+
+**Solution with blk-archive:**
+Use the `unpack` command with the `--create` option.
+
+**Example command:**
+```bash
+blk-archive unpack -a my-archive --stream af5449cc3a2f95ab --create /tmp/my-file
+speed            : 449.84M/s
+```
+
+## Restore to a block device
+
+**Scenario:**
+You want to restore a stream to an existing block device.
+
+**Goal:**
+Recreate a previously archived block device.
+
+**Solution with blk-archive:**
+Use `unpack` without `--create`. Destination must already exist and match original size.
+
+**Example command:**
+```bash
+blk-archive unpack -a my-archive --stream 7cd3daf2d6062d40 /dev/my-vg/restore-volume
+speed            : 1.72G/s
+```
+
+## Restore to a thinly provisioned block device
+
+**Scenario:**
+You want to restore data to a thin device, reusing storage via copy-on-write when possible.
+
+**Goal:**
+Maximize data sharing during restore to a thin device.
+
+**Solution with blk-archive:**
+blk-archive checks for duplicate regions and avoids unnecessary writes to preserve sharing.
+
+**Example command:**
+```bash
+blk-archive unpack -a my-archive --stream 7cd3daf2d6062d40 /dev/my-vg/restore-thin-volume
+speed            : 12.35G/s
+```
+
+## Integrate blk-archive with other tools
+
+**Scenario:**
+You want to integrate blk-archive into other tools or work flows
+
+**Goal:**
+Enable automated, non-interactive usage.
+
+**Solution with blk-archive:**
+blk-archive supports JSON output to facilitate integration with other tools.
+Use the `-j` option to enable JSON-formatted output.
+
+**Example command:**
+```bash
+blk-archive -j pack -a my-archive /usr/bin/ls
+```
+
+**Example JSON output:**
+```json
+{
+  "stats": {
+    "data_written": 145312,
+    "fill_size": 0,
+    "mapped_size": 145312
+  },
+  "stream_id": "2c7c9e40ebd7b26e"
+}
+
+```
+
+## Deleting a stream from an archive
+
+**Scenario:**
+You want to remove specific streams from an archive to save space.
+
+**Goal:**
+Delete unused streams from the archive.
+
+**Solution with blk-archive:**
+Not supported. Workaround is to create a new archive and repack selected streams using original
+files or block devices.
+
+**Example command:**
+_Not available. Feature not supported._
+
+## Migrating streams to a new archive
+
+**Scenario:**
+You want to move selected streams from one archive to another for cleanup or rotation.
+
+**Goal:**
+Support rotation, pruning, and long-term storage by moving streams.
+
+**Solution with blk-archive:**
+Planned feature. Not yet implemented.
+
+**Example command:**
+_Not available. Feature not implemented._
