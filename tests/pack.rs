@@ -85,7 +85,7 @@ fn pack_duplicate_verify_stats() -> Result<()> {
 
 #[test]
 fn pack_random_verify_stats() -> Result<()> {
-    let file_size_start = 16 * 1024 * 1024 as u64;
+    let file_size_start = 16 * 1024 * 1024_u64;
     let mut rng = rand::thread_rng();
 
     for _ in 0..10 {
@@ -95,7 +95,7 @@ fn pack_random_verify_stats() -> Result<()> {
         pack_common_verify_stats(size, Pattern::LCG)?;
     }
 
-    for s in vec![
+    for s in [
         file_size_start,
         file_size_start - 10,
         file_size_start + archive::SLAB_SIZE_TARGET as u64 + 10,
