@@ -35,6 +35,15 @@ udev = "0.9.1"
 walkdir = "2"
 zstd = "0.13.2"
 
+[build-dependencies]
+anyhow = "1.0"
+cli = { path = "./cli" }
+clap = { version = "4.5.26", features = ["cargo", "env"] }
+clap_mangen = "0.2"
+chrono = "0.4"
+glob = "0.3"
+regex = "1.0"
+
 [dev-dependencies]
 duct = "0.13"
 serde_json = "1.0"
