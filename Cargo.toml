@@ -1,5 +1,5 @@
 [package]
-name = "blk-archive"
+name = "blk_archive"
 version = "0.1.0"
 edition = "2021"
 
@@ -44,3 +44,7 @@ skip_cleanup = []
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "blk-archive"
+path = "src/main.rs"
