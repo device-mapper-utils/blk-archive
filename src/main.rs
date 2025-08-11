@@ -1,6 +1,4 @@
 use anyhow::Result;
-use clap::{command, Arg, ArgAction, ArgMatches, Command};
-use std::env;
 use std::process::exit;
 use std::sync::Arc;
 use thinp::report::*;
@@ -14,8 +12,8 @@ use blk_archive::unpack;
 
 //-----------------------
 
-fn mk_report(matches: &ArgMatches) -> Arc<Report> {
-    if matches.get_flag("JSON") {
+fn mk_report(json: bool) -> Arc<Report> {
+    if json {
         Arc::new(mk_quiet_report())
     } else if atty::is(atty::Stream::Stdout) {
         Arc::new(mk_progress_bar_report())
@@ -24,189 +22,45 @@ fn mk_report(matches: &ArgMatches) -> Arc<Report> {
     }
 }
 
-fn main_() -> Result<()> {
-    let archive_arg = Arg::new("ARCHIVE")
-        .help("Specify archive directory")
-        .long("archive")
-        .short('a')
-        .value_name("ARCHIVE")
-        .num_args(1)
-        .env("BLK_ARCHIVE_DIR")
-        .required(true);
-
-    let stream_arg = Arg::new("STREAM")
-        .help("Specify an archived stream to unpack")
-        .required(true)
-        .long("stream")
-        .short('s')
-        .value_name("STREAM")
-        .num_args(1);
-
-    let json: Arg = Arg::new("JSON")
-        .help("Output JSON")
-        .required(false)
-        .long("json")
-        .short('j')
-        .action(ArgAction::SetTrue)
-        .global(true);
-
-    let data_cache_size: Arg = Arg::new("DATA_CACHE_SIZE_MEG")
-        .help("Specify how much memory is used for caching data")
-        .required(false)
-        .long("data-cache-size-meg")
-        .value_name("DATA_CACHE_SIZE_MEG")
-        .num_args(1);
-
-    let matches = command!()
-        .arg(json)
-        .propagate_version(true)
-        .subcommand_required(true)
-        .arg_required_else_help(true)
-        .subcommand(
-            Command::new("create")
-                .about("creates a new archive")
-                // We don't want to take a default from the env var, so can't use
-                // archive_arg
-                .arg(
-                    Arg::new("ARCHIVE")
-                        .help("Specify archive directory")
-                        .required(true)
-                        .long("archive")
-                        .short('a')
-                        .value_name("ARCHIVE")
-                        .num_args(1),
-                )
-                .arg(
-                    Arg::new("BLOCK_SIZE")
-                        .help("Specify the average block size used when deduplicating data")
-                        .required(false)
-                        .long("block-size")
-                        .value_name("BLOCK_SIZE")
-                        .num_args(1),
-                )
-                .arg(
-                    Arg::new("HASH_CACHE_SIZE_MEG")
-                        .help("Specify how much memory is used for caching hash entries")
-                        .required(false)
-                        .long("hash-cache-size-meg")
-                        .value_name("HASH_CACHE_SIZE_MEG")
-                        .num_args(1),
-                )
-                .arg(data_cache_size.clone())
-                .arg(
-                    Arg::new("DATA_COMPRESSION")
-                        .long("data-compression")
-                        .value_name("y|n")
-                        .help("Enable or disable slab data compression")
-                        .value_parser(["y", "n"]) // Restrict values
-                        .default_value("y")
-                        .action(ArgAction::Set),
-                ),
-        )
-        .subcommand(
-            Command::new("pack")
-                .about("packs a stream into the archive")
-                .arg(
-                    Arg::new("INPUT")
-                        .help("Specify a device or file to archive")
-                        .required(true)
-                        .value_name("INPUT")
-                        .num_args(1),
-                )
-                .arg(archive_arg.clone())
-                .arg(
-                    Arg::new("DELTA_STREAM")
-                        .help(
-                            "Specify the stream that contains an older version of this thin device",
-                        )
-                        .required(false)
-                        .long("delta-stream")
-                        .value_name("DELTA_STREAM")
-                        .num_args(1),
-                )
-                .arg(
-                    Arg::new("DELTA_DEVICE")
-                        .help(
-                            "Specify the device that contains an older version of this thin device",
-                        )
-                        .required(false)
-                        .long("delta-device")
-                        .value_name("DELTA_DEVICE")
-                        .num_args(1),
-                )
-                .arg(data_cache_size.clone()),
-        )
-        .subcommand(
-            Command::new("unpack")
-                .about("unpacks a stream from the archive")
-                .arg(
-                    Arg::new("OUTPUT")
-                        .help("Specify a device or file as the destination")
-                        .required(true)
-                        .value_name("OUTPUT")
-                        .index(1),
-                )
-                .arg(
-                    Arg::new("CREATE")
-                        .help("Create a new file rather than unpack to an existing device/file.")
-                        .long("create")
-                        .action(clap::ArgAction::SetTrue),
-                )
-                .arg(data_cache_size.clone())
-                .arg(archive_arg.clone())
-                .arg(stream_arg.clone()),
-        )
-        .subcommand(
-            Command::new("verify")
-                .about("verifies stream in the archive against the original file/dev")
-                .arg(
-                    Arg::new("INPUT")
-                        .help("Specify a device or file containing the correct version of the data")
-                        .required(true)
-                        .value_name("INPUT")
-                        .num_args(1),
-                )
-                .arg(data_cache_size.clone())
-                .arg(archive_arg.clone())
-                .arg(stream_arg.clone()),
-        )
-        .subcommand(
-            Command::new("dump-stream")
-                .about("dumps stream instructions (development tool)")
-                .arg(archive_arg.clone())
-                .arg(stream_arg.clone()),
-        )
-        .subcommand(
-            Command::new("list")
-                .about("lists the streams in the archive")
-                .arg(archive_arg.clone()),
-        )
-        .get_matches();
-
-    let report = mk_report(&matches);
+fn mk_output(json: bool) -> Arc<Output> {
+    let report = mk_report(json);
     report.set_level(LogLevel::Info);
-    let output = Arc::new(Output {
-        report: report.clone(),
-        json: matches.get_flag("JSON"),
-    });
+
+    Arc::new(Output { report, json })
+}
+
+fn with_output<F>(matches: &clap::ArgMatches, f: F) -> Result<()>
+where
+    F: FnOnce(Arc<Output>) -> Result<()>,
+{
+    let json = matches.get_flag("JSON");
+    let output = mk_output(json);
+    f(output)
+}
+
+fn main_() -> Result<()> {
+    let cli = cli::build_cli();
+    let matches = cli.get_matches();
+
     match matches.subcommand() {
         Some(("create", sub_matches)) => {
-            create::run(sub_matches, report)?;
+            let output = mk_output(false);
+            create::run(sub_matches, output.report.clone())?;
         }
-        Some(("pack", sub_matches)) => {
-            pack::run(sub_matches, output)?;
+        Some(("pack", sub)) => {
+            with_output(sub, |out| pack::run(sub, out))?;
         }
-        Some(("unpack", sub_matches)) => {
-            unpack::run_unpack(sub_matches, output)?;
+        Some(("unpack", sub)) => {
+            with_output(sub, |out| unpack::run_unpack(sub, out))?;
         }
-        Some(("verify", sub_matches)) => {
-            unpack::run_verify(sub_matches, output)?;
+        Some(("verify", sub)) => {
+            with_output(sub, |out| unpack::run_verify(sub, out))?;
         }
-        Some(("list", sub_matches)) => {
-            list::run(sub_matches, output)?;
+        Some(("list", sub)) => {
+            with_output(sub, |out| list::run(sub, out))?;
         }
-        Some(("dump-stream", sub_matches)) => {
-            dump_stream::run(sub_matches, output)?;
+        Some(("dump-stream", sub)) => {
+            with_output(sub, |out| dump_stream::run(sub, out))?;
         }
         _ => unreachable!("Exhausted list of subcommands and subcommand_required prevents 'None'"),
     }
