@@ -82,7 +82,7 @@ impl MappingBuilder {
         }
 
         self.entries_emitted += 1;
-        if self.entries_emitted % self.index_period == 0 {
+        if self.entries_emitted.is_multiple_of(self.index_period) {
             self.vm_state.encode_pos(self.position, instrs)?;
         }
 

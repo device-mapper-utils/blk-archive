@@ -328,7 +328,7 @@ mod cuckoo_tests {
                 }
                 InsertResult::PossiblyPresent(n) => {
                     // Can happen due to false positives
-                    eprintln!("possibly present {}", n);
+                    eprintln!("possibly present {n}");
                 }
             }
         }
@@ -352,7 +352,7 @@ mod cuckoo_tests {
         }
 
         let false_positives = misses as f64 / hits as f64;
-        eprintln!("false positives: {}", false_positives);
+        eprintln!("false positives: {false_positives}");
         assert!(false_positives < 0.001);
     }
 }

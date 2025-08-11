@@ -104,7 +104,7 @@ fn log_output(output: &process::Output) {
 
 // Returns stdout. The command must return zero.
 pub fn run_ok(command: Command) -> Result<String> {
-    eprintln!("run_ok: {}", command);
+    eprintln!("run_ok: {command}");
 
     let output = run_raw(command)?;
     log_output(&output);
@@ -120,7 +120,7 @@ pub fn run_ok(command: Command) -> Result<String> {
 
 // Returns the entire output. The command must return zero.
 pub fn run_ok_raw(command: Command) -> Result<std::process::Output> {
-    eprintln!("run_ok_raw: {}", command);
+    eprintln!("run_ok_raw: {command}");
 
     let output = run_raw(command)?;
     log_output(&output);
@@ -131,7 +131,7 @@ pub fn run_ok_raw(command: Command) -> Result<std::process::Output> {
 
 // Returns stderr, a non zero status must be returned
 pub fn run_fail(command: Command) -> Result<String> {
-    eprintln!("run_fail: {}", command);
+    eprintln!("run_fail: {command}");
 
     let output = run_raw(command)?;
     log_output(&output);
@@ -147,7 +147,7 @@ pub fn run_fail(command: Command) -> Result<String> {
 
 // Returns the entire output, a non zero status must be returned
 pub fn run_fail_raw(command: Command) -> Result<std::process::Output> {
-    eprintln!("run_fail_raw: {}", command);
+    eprintln!("run_fail_raw: {command}");
 
     let output = run_raw(command)?;
     log_output(&output);
