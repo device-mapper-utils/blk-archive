@@ -190,7 +190,7 @@ fn new_stream_path_(rng: &mut ChaCha20Rng) -> Result<Option<(String, PathBuf)>> 
     let n: u64 = rng.gen();
 
     // turn this into a path
-    let name = format!("{:>016x}", n);
+    let name = format!("{n:>016x}");
     let path: PathBuf = ["streams", &name].iter().collect();
 
     if path.exists() {
@@ -327,10 +327,10 @@ impl Packer {
         } else {
             self.output
                 .report
-                .info(&format!("elapsed          : {}", elapsed));
+                .info(&format!("elapsed          : {elapsed}"));
             self.output
                 .report
-                .info(&format!("stream id        : {}", stream_id));
+                .info(&format!("stream id        : {stream_id}"));
             self.output
                 .report
                 .info(&format!("file size        : {:.2}", Size(self.input_size)));
@@ -358,7 +358,7 @@ impl Packer {
                 .info(&format!("stream written   : {:.2}", Size(stream_written)));
             self.output
                 .report
-                .info(&format!("ratio            : {:.2}", ratio));
+                .info(&format!("ratio            : {ratio:.2}"));
             self.output.report.info(&format!(
                 "speed            : {:.2}/s",
                 Size((total_read as f64 / elapsed) as u64)

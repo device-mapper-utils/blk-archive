@@ -53,7 +53,7 @@ impl ContentSensitiveSplitter {
         self.consume_c.block -= first_used;
     }
 
-    fn consume(&mut self, len: usize) -> IoVec {
+    fn consume(&mut self, len: usize) -> IoVec<'_> {
         let c = &mut self.consume_c;
         let blocks = &self.blocks;
 
@@ -88,7 +88,7 @@ impl ContentSensitiveSplitter {
         r
     }
 
-    fn consume_all(&mut self) -> IoVec {
+    fn consume_all(&mut self) -> IoVec<'_> {
         let c = &mut self.consume_c;
         let mut r = IoVec::new();
         while c.block < self.blocks.len() {
@@ -251,7 +251,7 @@ mod splitter_tests {
     impl<W: Write> IoVecHandler for CatHandler<'_, W> {
         fn handle_data(&mut self, iov: &IoVec) -> Result<()> {
             for v in iov {
-                println!("{:?}", v);
+                println!("{v:?}");
                 self.output.write_all(v)?;
             }
 
@@ -390,13 +390,13 @@ mod splitter_tests {
         eprintln!("{} chunks", handler.nr_chunks);
         let hist = handler.histogram();
         for (hits, (blocks, zs)) in hist {
-            eprintln!("{} hits: {}, zeroes: {}", hits, blocks, zs);
+            eprintln!("{hits} hits: {blocks}, zeroes: {zs}");
         }
 
         let lengths = handler.lengths();
         let mut csv = std::fs::File::create("dedup-lengths.csv").unwrap();
         for (len, hits) in lengths {
-            writeln!(csv, "{}, {}", len, hits).expect("write failed");
+            writeln!(csv, "{len}, {hits}").expect("write failed");
         }
 
         eprintln!(
