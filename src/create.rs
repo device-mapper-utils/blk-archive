@@ -93,7 +93,7 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
     let mut block_size = numeric_option::<usize>(matches, "BLOCK_SIZE", 4096)?;
     let new_block_size = adjust_block_size(block_size);
     if new_block_size != block_size {
-        report.info(&format!("adjusting block size to {}", new_block_size));
+        report.info(&format!("adjusting block size to {new_block_size}"));
         block_size = new_block_size;
     }
     let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
