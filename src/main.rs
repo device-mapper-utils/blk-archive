@@ -50,7 +50,8 @@ fn main_() -> Result<()> {
         if let Some(archive_path) = sub_matches.get_one::<String>("ARCHIVE") {
             // Do a preflight check before proceeding to ensure the archive is in a hopefully
             // good state (skip for create command as archive doesn't exist yet)
-            if subcommand_name != "create" {
+            if subcommand_name != "create" && std::env::var("BLK_ARCHIVE_DEVEL_SKIP_DATA").is_err()
+            {
                 flight_check(archive_path)?;
             }
         }
