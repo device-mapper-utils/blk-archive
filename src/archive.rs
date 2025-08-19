@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 pub const SLAB_SIZE_TARGET: usize = 4 * 1024 * 1024;
 
 pub struct Data {
+    skip_data: bool,
     seen: CuckooFilter,
     hashes: lru::LruCache<u32, ByHash>,
 
@@ -35,9 +36,18 @@ fn complete_slab_(slab: &mut SlabFile, buf: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: usize) -> Result<bool> {
+pub fn complete_slab(
+    slab: &mut SlabFile,
+    buf: &mut Vec<u8>,
+    threshold: usize,
+    fake_write: bool,
+) -> Result<bool> {
     if buf.len() > threshold {
-        complete_slab_(slab, buf)?;
+        if fake_write {
+            buf.clear();
+        } else {
+            complete_slab_(slab, buf)?;
+        }
         Ok(true)
     } else {
         Ok(false)
@@ -53,15 +63,19 @@ impl Data {
         let seen = CuckooFilter::read(paths::index_path())?;
         let hashes = lru::LruCache::new(NonZeroUsize::new(slab_capacity).unwrap());
         let nr_slabs = data_file.get_nr_slabs() as u32;
+        let skip_data = std::env::var("BLK_ARCHIVE_DEVEL_SKIP_DATA").is_ok();
 
         {
-            let hashes_file = hashes_file.lock().unwrap();
-            assert_eq!(data_file.get_nr_slabs(), hashes_file.get_nr_slabs());
+            if !skip_data {
+                let hashes_file = hashes_file.lock().unwrap();
+                assert_eq!(data_file.get_nr_slabs(), hashes_file.get_nr_slabs());
+            }
         }
 
         let slabs = lru::LruCache::new(NonZeroUsize::new(slab_capacity).unwrap());
 
         Ok(Self {
+            skip_data: skip_data,
             seen,
             hashes,
             data_file,
@@ -137,7 +151,7 @@ impl Data {
     }
 
     fn complete_data_slab(&mut self) -> Result<()> {
-        if complete_slab(&mut self.data_file, &mut self.data_buf, 0)? {
+        if complete_slab(&mut self.data_file, &mut self.data_buf, 0, self.skip_data)? {
             let mut builder = IndexBuilder::with_capacity(1024); // FIXME: estimate properly
             std::mem::swap(&mut builder, &mut self.current_index);
             let buffer = builder.build()?;

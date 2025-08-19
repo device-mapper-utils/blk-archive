@@ -105,6 +105,7 @@ impl DedupHandler {
             &mut self.stream_file,
             &mut self.stream_buf,
             SLAB_SIZE_TARGET,
+            false,
         )?;
         Ok(())
     }
@@ -175,7 +176,7 @@ impl IoVecHandler for DedupHandler {
         builder.complete(&mut self.stream_buf)?;
         drop(builder);
 
-        complete_slab(&mut self.stream_file, &mut self.stream_buf, 0)?;
+        complete_slab(&mut self.stream_file, &mut self.stream_buf, 0, false)?;
         self.stream_file.close()?;
 
         Ok(())
