@@ -163,12 +163,14 @@ impl Data {
 
         // Add entry to cuckoo filter, not checking return value as we could get indication that
         // it's "PossiblyPresent" when our logical expectation is "Inserted".
-        let ts_result = self.seen.test_and_set(hash_le_u64(&h), self.current_slab);
-        if ts_result.is_err() {
-            // Exceeded capacity, rebuild with more capacity.
-            let s = self.seen.capacity() * 2;
-            self.rebuild_index(s)?;
-        }
+        let key = hash_le_u64(&h);
+        self.seen
+            .test_and_set(key, self.current_slab)
+            .or_else(|_| {
+                let new_cap = self.seen.capacity() * 2;
+                self.rebuild_index(new_cap)?;
+                self.seen.test_and_set(key, self.current_slab)
+            })?;
 
         if self.data_buf.len() as u64 + len > SLAB_SIZE_TARGET as u64 {
             self.complete_data_slab()?;

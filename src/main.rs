@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{command, Arg, ArgAction, ArgMatches, Command};
+use clap::{command, Arg, ArgAction, ArgGroup, ArgMatches, Command, ValueHint};
 use std::env;
 use std::process::exit;
 use std::sync::Arc;
@@ -157,19 +157,30 @@ fn main_() -> Result<()> {
                 .arg(stream_arg.clone()),
         )
         .subcommand(
-            Command::new("verify")
-                .about("verifies stream in the archive against the original file/dev")
-                .arg(
-                    Arg::new("INPUT")
-                        .help("Specify a device or file containing the correct version of the data")
-                        .required(true)
-                        .value_name("INPUT")
-                        .num_args(1),
-                )
-                .arg(data_cache_size.clone())
-                .arg(archive_arg.clone())
-                .arg(stream_arg.clone()),
+    Command::new("verify")
+        .about("verifies stream in the archive against the original file/dev or an internal blake3 hash")
+        .arg(
+            Arg::new("INPUT")
+                .help("Device or file containing the correct version of the data")
+                .value_name("INPUT")
+                .value_hint(ValueHint::FilePath)
+                .num_args(1), // not required; enforced via group below
         )
+        .arg(
+            Arg::new("internal")
+                .long("internal")
+                .help("Verify using the archive's internally stored blake3 hash (no INPUT needed)")
+                .action(ArgAction::SetTrue),
+        )
+        .group(
+            ArgGroup::new("verify-source")
+                .args(["INPUT", "internal"])
+                .required(true), // must choose exactly one
+        )
+        .arg(data_cache_size.clone())
+        .arg(archive_arg.clone())
+        .arg(stream_arg.clone()),
+)
         .subcommand(
             Command::new("dump-stream")
                 .about("dumps stream instructions (development tool)")
