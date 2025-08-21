@@ -54,6 +54,7 @@ pub struct StreamConfig {
     pub mapped_size: u64,
     pub packed_size: u64,
     pub thin_id: Option<u32>,
+    pub source_sig: Option<String>,
 }
 
 pub fn read_stream_config(stream_id: &str) -> Result<StreamConfig> {
@@ -104,6 +105,7 @@ mod config_tests {
             mapped_size: u64::MAX,
             packed_size: u64::MAX,
             thin_id: None,
+            source_sig: None,
         };
 
         let ser = serde_yaml_ng::to_string(&config).unwrap();

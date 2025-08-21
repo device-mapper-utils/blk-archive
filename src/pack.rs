@@ -8,7 +8,10 @@ use serde_json::to_string_pretty;
 use size_display::Size;
 use std::boxed::Box;
 use std::env;
+use std::fs::File;
 use std::fs::OpenOptions;
+use std::io;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +30,7 @@ use crate::splitter::*;
 use crate::stream::*;
 use crate::stream_builders::*;
 use crate::thin_metadata::*;
+use crate::utils::unmapped_digest_add;
 
 //-----------------------------------------
 
@@ -211,6 +215,43 @@ fn new_stream_path() -> Result<(String, PathBuf)> {
     // Can't get here
 }
 
+#[inline]
+fn read_positional(file: &File, buf: &mut [u8], pos: u64) -> io::Result<usize> {
+    file.read_at(buf, pos)
+}
+
+/// Hash `len` bytes from `file` starting at `offset` into `hasher`.
+/// Returns the number of bytes actually hashed (could be < len if EOF reached).
+pub fn hash_region(
+    file: &mut File,
+    hasher: &mut blake3::Hasher,
+    offset: u64,
+    len: u64,
+) -> Result<u64> {
+    const BUF_SIZE: usize = 1 << 20; // 1 MiB
+    let mut buf = vec![0u8; BUF_SIZE];
+
+    let mut pos = offset;
+    let mut remaining = len;
+    let mut total = 0u64;
+
+    while remaining > 0 {
+        let want = std::cmp::min(remaining, buf.len() as u64) as usize;
+
+        let n = read_positional(file, &mut buf[..want], pos)?;
+        if n == 0 {
+            break; // EOF
+        }
+
+        hasher.update(&buf[..n]);
+        pos += n as u64;
+        remaining -= n as u64;
+        total += n as u64;
+    }
+
+    Ok(total)
+}
+
 struct Packer {
     output: Arc<Output>,
     input_path: PathBuf,
@@ -286,11 +327,18 @@ impl Packer {
         self.output.report.progress(0);
         let start_time: DateTime<Utc> = Utc::now();
 
+        let mut input_digest = blake3::Hasher::new();
+
+        let mut offset = 0u64;
         let mut total_read = 0u64;
+        let mut input_source = File::open(self.input_path.clone())?;
+
         for chunk in &mut self.it {
             match chunk? {
                 Chunk::Mapped(buffer) => {
                     let len = buffer.len();
+                    offset += len as u64;
+                    input_digest.update(&buffer[..len]);
                     splitter.next_data(buffer, &mut handler)?;
                     total_read += len as u64;
                     self.output
@@ -299,12 +347,22 @@ impl Packer {
                 }
                 Chunk::Unmapped(len) => {
                     assert!(len > 0);
+                    unmapped_digest_add(&mut input_digest, len);
+                    offset += len;
                     splitter.next_break(&mut handler)?;
                     handler.handle_gap(len)?;
                 }
                 Chunk::Ref(len) => {
+                    // We need to retrieve the data from the source device or file starting at
+                    // offset with the supplied length to update the input hash
+                    // Note: How much of a preformance hit does this cause?
+                    let processed_len =
+                        hash_region(&mut input_source, &mut input_digest, offset, len)?;
+                    assert_eq!(len, processed_len);
+
                     splitter.next_break(&mut handler)?;
                     handler.handle_ref(len)?;
+                    offset += len;
                 }
             }
         }
@@ -312,6 +370,9 @@ impl Packer {
         splitter.complete(&mut handler)?;
         self.output.report.progress(100);
         handler.archive.flush()?;
+
+        let input_hex_digest = input_digest.finalize().to_hex().to_string();
+
         let end_time: DateTime<Utc> = Utc::now();
         let elapsed = end_time - start_time;
         let elapsed = elapsed.num_milliseconds() as f64 / 1000.0;
@@ -322,7 +383,8 @@ impl Packer {
         if self.output.json {
             // Should all the values simply be added to the json too?  We can always add entries, but
             // we can never take any away to maintains backwards compatibility with JSON consumers.
-            let result = json!({ "stream_id": stream_id, "stats": handler.stats, });
+            let result =
+                json!({ "stream_id": stream_id, "stats": handler.stats, "hash": input_hex_digest});
             println!("{}", to_string_pretty(&result).unwrap());
         } else {
             self.output
@@ -374,6 +436,7 @@ impl Packer {
             mapped_size: self.mapped_size,
             packed_size: handler.stats.data_written + stream_written,
             thin_id: self.thin_id,
+            source_sig: Some(input_hex_digest),
         };
         config::write_stream_config(&stream_id, &cfg)?;
 

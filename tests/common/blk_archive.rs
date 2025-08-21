@@ -23,6 +23,7 @@ pub struct PackStats {
 pub struct PackResponse {
     pub stream_id: String,
     pub stats: PackStats,
+    pub hash: String,
 }
 
 impl BlkArchive {
