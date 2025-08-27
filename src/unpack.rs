@@ -749,7 +749,7 @@ pub fn run_verify(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     let stored_hash = stream_cfg.source_sig;
 
     let calculated_hash = if matches.get_flag("internal") {
-        run_verify_stream(&stream, output, stream_cfg.size, cache_nr_entries)?
+        run_verify_stream(stream, output, stream_cfg.size, cache_nr_entries)?
     } else {
         run_verify_device_or_file(
             input_file,
