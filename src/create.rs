@@ -86,31 +86,32 @@ fn numeric_option<T: std::str::FromStr>(matches: &ArgMatches, name: &str, dflt: 
 }
 */
 
-pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
-    let dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap());
-    let data_compression = matches.get_one::<String>("DATA_COMPRESSION").unwrap() == "y";
+pub struct CreateArgs {
+    pub dir: PathBuf,
+    pub data_compression: bool,
+    pub block_size: usize,
+    pub hash_cache_size_meg: usize,
+    pub data_cache_size_meg: usize,
+}
 
-    let mut block_size = numeric_option::<usize>(matches, "BLOCK_SIZE", 4096)?;
-    let new_block_size = adjust_block_size(block_size);
-    if new_block_size != block_size {
-        report.info(&format!("adjusting block size to {}", new_block_size));
-        block_size = new_block_size;
-    }
-    let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
-    let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
+pub fn archive_create(args: &CreateArgs) -> Result<()> {
+    //fs::create_dir(args.dir.clone())?;
+    write_config(
+        &args.dir,
+        args.block_size,
+        args.hash_cache_size_meg,
+        args.data_cache_size_meg,
+    )?;
+    create_sub_dir(&args.dir, "data")?;
+    create_sub_dir(&args.dir, "streams")?;
+    create_sub_dir(&args.dir, "indexes")?;
 
-    fs::create_dir(dir)?;
-    write_config(dir, block_size, hash_cache_size_meg, data_cache_size_meg)?;
-    create_sub_dir(dir, "data")?;
-    create_sub_dir(dir, "streams")?;
-    create_sub_dir(dir, "indexes")?;
-
-    std::env::set_current_dir(dir)?;
+    std::env::set_current_dir(&args.dir)?;
 
     // Create empty data and hash slab files
     let mut data_file = SlabFileBuilder::create(data_path())
         .queue_depth(1)
-        .compressed(data_compression)
+        .compressed(args.data_compression)
         .build()?;
     data_file.close()?;
 
@@ -125,6 +126,31 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
     index.write(paths::index_path())?;
 
     Ok(())
+}
+
+pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
+    let dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap());
+    let data_compression = matches.get_one::<String>("DATA_COMPRESSION").unwrap() == "y";
+
+    let mut block_size = numeric_option::<usize>(matches, "BLOCK_SIZE", 4096)?;
+    let new_block_size = adjust_block_size(block_size);
+    if new_block_size != block_size {
+        report.info(&format!("adjusting block size to {}", new_block_size));
+        block_size = new_block_size;
+    }
+    let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
+    let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
+
+    let args = CreateArgs {
+        dir: dir.to_path_buf(),
+        data_compression,
+        block_size,
+        hash_cache_size_meg,
+        data_cache_size_meg,
+    };
+
+    fs::create_dir(args.dir.clone())?;
+    archive_create(&args)
 }
 
 //-----------------------------------------
