@@ -224,6 +224,37 @@ impl Data {
         info: &ByIndex,
         partial: Option<(u32, u32)>,
     ) -> (usize, usize) {
+        // My understanding, maybe inaccurate ...
+        //
+        // Data from de-duplicated files is stored in a single "slab file." Each appended
+        // slab has the following structure:
+        //
+        //     [ SLAB_MAGIC | length | checksum | chunk1 | chunk2 | ... ]
+        //
+        // A slab consists of multiple chunks. Once the pending data reaches ≥ 4 MiB,
+        // the slab is flushed to the slab file, and the corresponding hash metadata
+        // is written to the "hashes" file (which also uses the slab format).
+        //
+        // Data retrieval (data_get):
+        // - For a given slab, we load the ByIndex metadata, which provides the start
+        //   and end offsets of each chunk along with its expected hash.
+        // - The `offset` parameter identifies which chunk (N) to fetch.
+        // - The `nr_entries` parameter specifies how many consecutive chunks to fetch.
+        //   Typically we retrieve a single chunk, but when `nr_entries > 1` (e.g. for
+        //   delta operations), we return the contiguous region from the start of the
+        //   first chunk through the end of the last.
+        //
+        // Partial retrievals:
+        // - A request may only cover part of the contiguous region.
+        // - In this case, we adjust the calculated `data_start` and `data_end` offsets
+        //   accordingly to return only the requested portion.
+        //
+        // Notes:
+        // - This logic should be validated with thorough testing.
+        // - Slabs on persistent storage shall remain contiguous (chunk-to-chunk)
+        //   as the interface in data_get requires it or requires it simulates it when
+        //   using nr_entries.
+
         let (data_begin, data_end) = if nr_entries == 1 {
             let (data_begin, data_end, _expected_hash) = info.get(offset as usize).unwrap();
             (*data_begin as usize, *data_end as usize)
