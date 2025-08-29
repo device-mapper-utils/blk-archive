@@ -96,7 +96,12 @@ fn pos(index: usize) -> usize {
 }
 
 fn get_hash(data: &[u8], i: usize) -> &Hash256 {
-    Hash256::from_slice(&data[pos(i)..pos(i + 1)])
+    let start = pos(i);
+    let end = pos(i + 1);
+    data[start..end]
+        .try_into()
+        .map(|arr: &Hash256| arr)
+        .expect("slice not 32 bytes")
 }
 
 fn bsearch(h: &Hash256, data: &[u8], max: usize) -> Option<usize> {
