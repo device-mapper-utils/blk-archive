@@ -855,7 +855,7 @@ mod test_data_store {
         );
 
         // random read speed
-        if false {
+        if true {
             let random = shuffle_vec(dedup);
             {
                 let mut ad = open_blk_archive(&args)?;
