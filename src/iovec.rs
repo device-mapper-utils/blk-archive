@@ -16,6 +16,12 @@ impl<'a> From<&'a [u8]> for IoVec<'a> {
     }
 }
 
+impl<'a> Default for IoVec<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn to_iovec(buf: &[u8]) -> IoVec<'_> {
     IoVec::from(buf)
 }

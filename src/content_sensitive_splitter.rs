@@ -382,6 +382,21 @@ mod splitter_tests {
         assert_eq!(input_buf, output_buf);
     }
 
+    fn open_out(name: &str) -> std::io::Result<std::fs::File> {
+        use std::{
+            fs::{self, OpenOptions},
+            path::PathBuf,
+        };
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // absolute path to crate root
+        dir.push("target"); // or "results", etc.
+        fs::create_dir_all(&dir)?;
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(dir.join(name))
+    }
+
     #[test]
     fn splitter_finds_similar_blocks() {
         let input_buf = prep_data();
@@ -397,7 +412,7 @@ mod splitter_tests {
         }
 
         let lengths = handler.lengths();
-        let mut csv = std::fs::File::create("dedup-lengths.csv").unwrap();
+        let mut csv = open_out("dedup-lengths.csv").unwrap();
         for (len, hits) in lengths {
             writeln!(csv, "{}, {}", len, hits).expect("write failed");
         }

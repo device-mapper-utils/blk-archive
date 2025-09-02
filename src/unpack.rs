@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::archive;
-use crate::archive::SLAB_SIZE_TARGET;
+use crate::archive::data::*;
+use crate::archive::file_based::SLAB_SIZE_TARGET;
 use crate::chunkers::*;
 use crate::config;
 use crate::output::Output;
@@ -38,7 +39,7 @@ trait UnpackDest {
 
 struct Unpacker<D: UnpackDest> {
     stream_file: SlabFile,
-    archive: archive::Data,
+    archive: Box<dyn archive::data::Store>,
     dest: D,
 }
 
@@ -51,9 +52,11 @@ impl<D: UnpackDest> Unpacker<D> {
         let hashes_file = Arc::new(Mutex::new(SlabFileBuilder::open(hashes_path()).build()?));
         let stream_file = SlabFileBuilder::open(stream_path(stream)).build()?;
 
+        let param = Backend::File(Box::new(data_file), hashes_file, cache_nr_entries);
+
         Ok(Self {
             stream_file,
-            archive: archive::Data::new(data_file, hashes_file, cache_nr_entries)?,
+            archive: make_store(param)?,
             dest,
         })
     }

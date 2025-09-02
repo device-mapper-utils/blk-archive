@@ -15,6 +15,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::archive::file_based::*;
 use crate::archive::*;
 use crate::chunkers::*;
 use crate::config;
@@ -22,6 +23,7 @@ use crate::content_sensitive_splitter::*;
 use crate::hash::*;
 use crate::iovec::*;
 use crate::output::Output;
+use crate::pack::data::complete_slab;
 use crate::paths::*;
 use crate::run_iter::*;
 use crate::slab::builder::*;
@@ -83,14 +85,14 @@ struct DedupHandler {
     mapping_builder: Arc<Mutex<dyn Builder>>,
 
     stats: DedupStats,
-    archive: Data,
+    archive: Box<dyn data::Store>,
 }
 
 impl DedupHandler {
     fn new(
         stream_file: SlabFile,
         mapping_builder: Arc<Mutex<dyn Builder>>,
-        archive: Data,
+        archive: Box<dyn data::Store>,
     ) -> Result<Self> {
         let stats = DedupStats::default();
 
@@ -130,12 +132,6 @@ impl DedupHandler {
         self.maybe_complete_stream()?;
 
         Ok(())
-    }
-
-    // TODO: Is there a better way to handle this and what are the ramifications with
-    // client server with multiple clients and one server?
-    fn ensure_extra_capacity(&mut self, blocks: usize) -> Result<()> {
-        self.archive.ensure_extra_capacity(blocks)
     }
 }
 
@@ -318,11 +314,12 @@ impl Packer {
             / std::mem::size_of::<Hash256>())
             / hashes_per_slab;
 
-        let ad: Data = Data::new(data_file, hashes_file, slab_capacity)?;
+        let ad_config = data::Backend::File(Box::new(data_file), hashes_file, slab_capacity);
+        let mut ad = data::make_store(ad_config)?;
+
+        ad.ensure_extra_capacity(self.mapped_size as usize / self.block_size)?;
 
         let mut handler = DedupHandler::new(stream_file, self.mapping_builder.clone(), ad)?;
-
-        handler.ensure_extra_capacity(self.mapped_size as usize / self.block_size)?;
 
         self.output.report.progress(0);
         let start_time: DateTime<Utc> = Utc::now();
