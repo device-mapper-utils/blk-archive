@@ -7,7 +7,7 @@ use crate::iovec::*;
 
 type Blake2b32 = Blake2b<generic_array::typenum::U4>;
 type Blake2b64 = Blake2b<generic_array::typenum::U8>;
-type Blake2b256 = Blake2b<generic_array::typenum::U32>;
+pub type Blake2b256 = Blake2b<generic_array::typenum::U32>;
 
 pub type Hash32 = generic_array::GenericArray<u8, generic_array::typenum::U4>;
 pub type Hash64 = generic_array::GenericArray<u8, generic_array::typenum::U8>;
@@ -49,6 +49,14 @@ pub fn hash_64(v: &[u8]) -> Hash64 {
     hasher.finalize()
 }
 
+pub fn hash_64_to_u64(v: &Hash64) -> u64 {
+    u64::from_le_bytes(
+        v[..8]
+            .try_into()
+            .expect("hash_64 must return at least 8 bytes"),
+    )
+}
+
 pub fn hash_32(v: &[u8]) -> Hash32 {
     let mut hasher = Blake2b32::new();
     hasher.update(v);
@@ -62,6 +70,16 @@ pub fn hash_le_u64(h: &[u8]) -> u64 {
             .try_into()
             .expect("hash_64 must return at least 8 bytes"),
     )
+}
+
+pub fn hash256_to_bytes(h: &Hash256) -> [u8; 32] {
+    let mut rc = [0u8; 32];
+    rc.copy_from_slice(h);
+    rc
+}
+
+pub fn bytes_to_hash256(v: &[u8; 32]) -> &Hash256 {
+    Hash256::from_slice(&v[..])
 }
 
 //-----------------------------------------
@@ -84,5 +102,17 @@ mod hash_tests {
         // What we are replacing it with
         let current = hash_le_u64(&h);
         assert_eq!(previous, current);
+    }
+
+    #[test]
+    fn to_wire() {
+        let bytes = [0, 128];
+
+        // TODO: Maybe there is a better way to simply serialize/deserialize for the wire for a Hash256
+        let reference = hash_256(&bytes);
+        let as_bytes_rep = hash256_to_bytes(&reference);
+        let converted = bytes_to_hash256(&as_bytes_rep);
+
+        assert_eq!(reference, *converted);
     }
 }

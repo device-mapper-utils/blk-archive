@@ -2,13 +2,13 @@ use anyhow::{anyhow, Context, Result};
 use devicemapper::*;
 use libc;
 use nom::IResult;
+use parking_lot::Mutex;
 use roaring::bitmap::RoaringBitmap;
 use std::collections::*;
 use std::fs::OpenOptions;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::Mutex;
 use thinp::io_engine::*;
 use thinp::pdata::btree;
 use thinp::pdata::btree::*;
@@ -79,7 +79,7 @@ struct MappingCollector {
 
 impl MappingCollector {
     fn provisioned(self) -> RoaringBitmap {
-        self.provisioned.into_inner().unwrap()
+        self.provisioned.into_inner()
     }
 }
 
@@ -92,7 +92,7 @@ impl NodeVisitor<BlockTime> for MappingCollector {
         keys: &[u64],
         _values: &[BlockTime],
     ) -> btree::Result<()> {
-        let mut bits = self.provisioned.lock().unwrap();
+        let mut bits = self.provisioned.lock();
         for k in keys {
             assert!(*k <= u32::MAX as u64);
             bits.insert(*k as u32);

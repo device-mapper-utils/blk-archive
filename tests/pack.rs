@@ -4,8 +4,8 @@ use rand::Rng;
 mod common;
 
 use blk_archive::archive;
-use common::blk_archive::PackResponse;
-use common::fixture::{create_archive, create_input_file, BLOCK_SIZE};
+use common::blk_archive::{same_bytes, PackResponse};
+use common::fixture::{create_archive, create_input_file, create_output_file_name, BLOCK_SIZE};
 use common::random::Pattern;
 use common::test_dir::*;
 
@@ -47,19 +47,20 @@ fn pack_common_verify_stats(file_size: u64, pattern: Pattern) -> Result<PackResp
     let input = create_input_file(&mut td, file_size, seed, pattern.clone())?;
     let response = archive.pack(&input)?;
 
+    assert_eq!(response.stats.size, file_size);
     assert_eq!(response.stats.mapped_size, file_size);
 
     match pattern {
         Pattern::LCG => {
-            assert_eq!(file_size, response.stats.data_written);
+            assert_eq!(file_size, response.stats.written);
             assert_eq!(response.stats.fill_size, 0);
         }
         Pattern::SingleByte(_a) => {
-            assert_eq!(response.stats.data_written, 0);
+            assert_eq!(response.stats.written, 0);
             assert_eq!(response.stats.fill_size, file_size);
         }
         Pattern::Repeating(pattern) => {
-            assert_eq!(response.stats.data_written, pattern.len() as u64);
+            assert_eq!(response.stats.written, pattern.len() as u64);
             assert_eq!(response.stats.fill_size, 0);
         }
     }
@@ -102,6 +103,40 @@ fn pack_random_verify_stats() -> Result<()> {
     ] {
         pack_common_verify_stats(s, Pattern::LCG)?;
     }
+
+    Ok(())
+}
+
+#[test]
+fn start_stop_service() -> Result<()> {
+    let mut td = TestDir::new()?;
+    let mut archive = create_archive(&mut td, true)?;
+
+    archive.service_start()?;
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    archive.service_end()?;
+    Ok(())
+}
+
+#[test]
+fn pack_one_file_service() -> Result<()> {
+    let mut td = TestDir::new()?;
+    let mut archive = create_archive(&mut td, true)?;
+
+    archive.service_start()?;
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    let file_size = 16 * 1024 * 1024;
+    let seed = 1;
+    let input = create_input_file(&mut td, file_size, seed, Pattern::LCG)?;
+    let stream_id = archive.send(&input)?.stream_id;
+
+    let output_file = create_output_file_name(&mut td)?;
+
+    archive.receive(&stream_id, &output_file)?;
+
+    // Don't have a verify, so we will receive and compare
+    assert!(same_bytes(&input, &output_file)?);
 
     Ok(())
 }

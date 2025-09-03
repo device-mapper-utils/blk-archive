@@ -1,11 +1,6 @@
-use anyhow::{anyhow, Result};
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::sync::{Arc, Mutex};
-
-use crate::hash_index::*;
-use crate::slab::*;
 use crate::stream::*;
+use anyhow::{anyhow, Result};
+use std::io::Write;
 
 //------------------------------
 
@@ -59,13 +54,9 @@ impl MappingBuilder {
             Unmapped { len } => {
                 self.vm_state.encode_unmapped(*len, instrs)?;
             }
-            Data {
-                slab,
-                offset,
-                nr_entries,
-            } => {
+            MapEntry::Data(d) | MapEntry::DataWithLen { d, .. } => {
                 self.vm_state
-                    .encode_data(*slab, *offset, *nr_entries, instrs)?;
+                    .encode_data(d.slab, d.offset, d.nr_entries, instrs)?;
             }
             Partial {
                 begin,
@@ -111,31 +102,21 @@ impl Builder for MappingBuilder {
             (Unmapped { len: l1 }, Unmapped { len: l2 }) => {
                 self.entry = Some(Unmapped { len: l1 + l2 });
             }
-            (
-                Data {
-                    slab: s1,
-                    offset: o1,
-                    nr_entries: n1,
-                },
-                Data {
-                    slab: s2,
-                    offset: o2,
-                    nr_entries: n2,
-                },
-            ) => {
-                if s1 == *s2 && o1 + n1 == *o2 {
-                    self.entry = Some(Data {
-                        slab: s1,
-                        offset: o1,
-                        nr_entries: n1 + n2,
-                    });
+            (Data(d1), Data(d2)) => {
+                if d1.slab == d2.slab && d1.offset + d1.nr_entries == d2.offset {
+                    self.entry = Some(Data(DataFields {
+                        slab: d1.slab,
+                        offset: d1.offset,
+                        nr_entries: d1.nr_entries + d2.nr_entries,
+                    }));
                 } else {
-                    self.vm_state.encode_data(s1, o1, n1, &mut instrs)?;
-                    self.entry = Some(Data {
-                        slab: *s2,
-                        offset: *o2,
-                        nr_entries: *n2,
-                    });
+                    self.vm_state
+                        .encode_data(d1.slab, d1.offset, d1.nr_entries, &mut instrs)?;
+                    self.entry = Some(Data(DataFields {
+                        slab: d2.slab,
+                        offset: d2.offset,
+                        nr_entries: d2.nr_entries,
+                    }));
                 }
             }
             (old_e, new_e) => {
@@ -161,44 +142,25 @@ impl Builder for MappingBuilder {
 
 //------------------------------
 
-pub struct DeltaBuilder {
-    old_entries: StreamIter,
+pub struct DeltaBuilder<I>
+where
+    I: Iterator<Item = MapEntry>,
+{
+    old_entries: I,
     old_entry: Option<MapEntry>, // unconsumed remnant from the old_entries
-
-    // FIXME: wrap these two up together, lru cache, share somehow with pack?
-    hashes_file: Arc<Mutex<SlabFile>>,
-    slabs: BTreeMap<u32, Arc<ByIndex>>, // FIXME: why an Arc if they're not shared?
-
     builder: MappingBuilder,
 }
 
-impl DeltaBuilder {
-    pub fn new(old_entries: StreamIter, hashes_file: Arc<Mutex<SlabFile>>) -> Self {
+impl<I> DeltaBuilder<I>
+where
+    I: Iterator<Item = MapEntry>,
+{
+    pub fn new(old_entries: I) -> Self {
         Self {
             old_entries,
             old_entry: None,
-            hashes_file,
-            slabs: BTreeMap::new(),
             builder: MappingBuilder::default(),
         }
-    }
-
-    fn get_index_(&mut self, slab: u32) -> Result<Arc<ByIndex>> {
-        let mut hashes_file = self.hashes_file.lock().unwrap();
-        let hashes = hashes_file.read(slab)?;
-        Ok(Arc::new(ByIndex::new(hashes)?))
-    }
-
-    fn get_index(&mut self, slab: u32) -> Result<Arc<ByIndex>> {
-        let index = if let Some(index) = self.slabs.get(&slab) {
-            index.clone()
-        } else {
-            let r = self.get_index_(slab)?;
-            self.slabs.insert(slab, r.clone());
-            r
-        };
-
-        Ok(index)
     }
 
     fn entry_len(&mut self, e: &MapEntry) -> Result<u64> {
@@ -206,19 +168,10 @@ impl DeltaBuilder {
 
         match e {
             Fill { len, .. } => Ok(*len),
-            Data {
-                slab,
-                offset,
-                nr_entries,
-            } => {
-                let index = self.get_index(*slab)?;
-                let mut total_len = 0;
-                for i in *offset..(offset + nr_entries) {
-                    let (data_begin, data_end, _) = index.get(i as usize).unwrap();
-                    total_len += data_end - data_begin;
-                }
-                Ok(total_len as u64)
+            Data(_d) => {
+                panic!("The delta build path is expected to only use 'DataWithLen entries!");
             }
+            DataWithLen { d: _, len } => Ok(*len),
             Unmapped { len } => Ok(*len),
             Partial { begin, end, .. } => Ok((end - begin) as u64),
             Ref { len } => Ok(*len),
@@ -251,24 +204,20 @@ impl DeltaBuilder {
                     len: entry_len - split_point,
                 },
             ),
-            Data {
-                slab,
-                offset,
-                nr_entries,
-            } => (
+            MapEntry::Data(d) | MapEntry::DataWithLen { d, .. } => (
                 Partial {
                     begin: 0,
                     end: split_point as u32,
-                    slab: *slab,
-                    offset: *offset,
-                    nr_entries: *nr_entries,
+                    slab: d.slab,
+                    offset: d.offset,
+                    nr_entries: d.nr_entries,
                 },
                 Partial {
                     begin: split_point as u32,
                     end: entry_len as u32,
-                    slab: *slab,
-                    offset: *offset,
-                    nr_entries: *nr_entries,
+                    slab: d.slab,
+                    offset: d.offset,
+                    nr_entries: d.nr_entries,
                 },
             ),
             Partial {
@@ -306,7 +255,7 @@ impl DeltaBuilder {
         let mut maybe_entry = self.old_entry.take();
 
         if maybe_entry.is_none() {
-            maybe_entry = self.old_entries.next().transpose()?;
+            maybe_entry = self.old_entries.next();
         }
 
         Ok(maybe_entry)
@@ -363,7 +312,10 @@ impl DeltaBuilder {
     }
 }
 
-impl Builder for DeltaBuilder {
+impl<I> Builder for DeltaBuilder<I>
+where
+    I: Iterator<Item = MapEntry>,
+{
     fn next(&mut self, e: &MapEntry, len: u64, w: &mut Vec<u8>) -> Result<()> {
         use MapEntry::*;
 
@@ -389,11 +341,11 @@ mod stream_tests {
 
     fn mk_run(slab: u32, b: u32, e: u32) -> MapEntry {
         assert!((e - b) < u16::MAX as u32);
-        MapEntry::Data {
+        MapEntry::Data(DataFields {
             slab,
             offset: b,
             nr_entries: e - b,
-        }
+        })
     }
 
     #[test]

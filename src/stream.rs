@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use nom::{combinator::fail, multi::*, number::complete::*, IResult};
 use num_enum::TryFromPrimitive;
+use rkyv::{Archive, Deserialize, Serialize};
 use serde_json::json;
 use serde_json::to_string_pretty;
 use std::collections::HashMap;
@@ -461,7 +462,28 @@ impl MapInstruction {
 
 pub type IVec = Vec<MapInstruction>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[rkyv(
+    // This will generate a PartialEq impl between our unarchived
+    // and archived types
+    compare(PartialEq),
+    // Derives can be passed through to the generated type:
+    derive(Debug),
+)]
+pub struct DataFields {
+    pub slab: u32,
+    pub offset: u32,
+    pub nr_entries: u32,
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[rkyv(
+    // This will generate a PartialEq impl between our unarchived
+    // and archived types
+    compare(PartialEq),
+    // Derives can be passed through to the generated type:
+    derive(Debug),
+)]
 pub enum MapEntry {
     Fill {
         byte: u8,
@@ -470,10 +492,10 @@ pub enum MapEntry {
     Unmapped {
         len: u64,
     },
-    Data {
-        slab: u32,
-        offset: u32,
-        nr_entries: u32,
+    Data(DataFields),
+    DataWithLen {
+        d: DataFields,
+        len: u64,
     },
     Partial {
         begin: u32,
@@ -544,7 +566,7 @@ impl VMState {
     // Finds the register that would take the fewest bytes to encode.
     // This doesn't consider the top of the stack (index 0).
     // FIXME: so slow
-    fn nearest_register(&self, slab: u32, offset: u32) -> usize {
+    fn nearest_register(&mut self, slab: u32, offset: u32) -> usize {
         let target = Register { slab, offset };
         let mut index = 0;
         let mut min_cost = Self::distance_cost(self.stack.get(index), &target);
@@ -744,11 +766,11 @@ impl MappingUnpacker {
                 nr_entries: len as u32,
             });
         } else {
-            r.push(MapEntry::Data {
+            r.push(MapEntry::Data(DataFields {
                 slab: top.slab,
                 offset: top.offset,
                 nr_entries: len as u32,
-            });
+            }));
         }
         top.offset += len as u32;
     }
@@ -912,11 +934,13 @@ impl StreamIter {
     }
 
     fn next_slab(&mut self) -> Result<bool> {
+        // Increment slab before we do bound checks
+        self.slab += 1;
+
         if self.slab >= self.file.get_nr_slabs() as u32 {
             return Ok(false);
         }
 
-        self.slab += 1;
         let entries = Self::read_slab(&mut self.file, self.slab)?;
         self.entries = entries;
         self.index = 0;
@@ -1116,14 +1140,14 @@ impl Dumper {
 
         match instr {
             Rot { index } => {
-                format!("   rot {}", index)
+                format!("   rot {index}")
             }
             Dup { index } => {
-                format!("   dup {}", index)
+                format!("   dup {index}")
             }
 
             SetFill { byte } => {
-                format!("set-fill {}", byte)
+                format!("set-fill {byte}")
             }
             Fill8 { len } => {
                 format!("   fill {} ({})", len, self.vm_state.fill)
@@ -1139,64 +1163,64 @@ impl Dumper {
             }
 
             Unmapped8 { len } => {
-                format!("   unmap {}", len)
+                format!("   unmap {len}")
             }
             Unmapped16 { len } => {
-                format!("   unmap {}", len)
+                format!("   unmap {len}")
             }
             Unmapped32 { len } => {
-                format!("   unmap {}", len)
+                format!("   unmap {len}")
             }
             Unmapped64 { len } => {
-                format!("   unmap {}", len)
+                format!("   unmap {len}")
             }
 
             Slab16 { slab } => {
-                format!("   s.set {}", slab)
+                format!("   s.set {slab}")
             }
             Slab32 { slab } => {
-                format!("   s.set {}", slab)
+                format!("   s.set {slab}")
             }
             SlabDelta4 { delta } => {
-                format!("   s.add {}", delta)
+                format!("   s.add {delta}")
             }
             SlabDelta12 { delta } => {
-                format!("   s.add {}", delta)
+                format!("   s.add {delta}")
             }
             NextSlab => "   next".to_string(),
             Offset4 { offset } => {
-                format!("   o.set {}", offset)
+                format!("   o.set {offset}")
             }
             Offset12 { offset } => {
-                format!("   o.set {}", offset)
+                format!("   o.set {offset}")
             }
             Offset20 { offset } => {
-                format!("   o.set {}", offset)
+                format!("   o.set {offset}")
             }
             OffsetDelta4 { delta } => {
-                format!("   o.add {}", delta)
+                format!("   o.add {delta}")
             }
             OffsetDelta12 { delta } => {
-                format!("   o.add {}", delta)
+                format!("   o.add {delta}")
             }
             Emit4 { len } => {
-                format!("   emit {}", len)
+                format!("   emit {len}")
             }
             Emit12 { len } => {
-                format!("   emit {}", len)
+                format!("   emit {len}")
             }
             Emit20 { len } => {
-                format!("   emit {:<10}", len)
+                format!("   emit {len:<10}")
             }
             Pos32 { pos } => {
-                format!("   pos {:<10}", pos)
+                format!("   pos {pos:<10}")
             }
             Pos64 { pos } => {
-                format!("   pos {:<10}", pos)
+                format!("   pos {pos:<10}")
             }
             Partial { begin, end } => {
-                let str = format!("{}..{}", begin, end);
-                format!("   part {:<10}", str)
+                let str = format!("{begin}..{end}");
+                format!("   part {str:<10}")
             }
         }
     }
@@ -1307,7 +1331,7 @@ impl Dumper {
         } else {
             println!("\n\nInstruction frequencies:\n");
             for (instr, count) in stats {
-                println!("    {:>15} {:<10}", instr, count);
+                println!("    {instr:>15} {count:<10}");
             }
         }
 
