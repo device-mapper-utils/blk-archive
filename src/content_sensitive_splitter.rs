@@ -53,7 +53,7 @@ impl ContentSensitiveSplitter {
         self.consume_c.block -= first_used;
     }
 
-    fn consume(&mut self, len: usize) -> IoVec {
+    fn consume(&mut self, len: usize) -> IoVec<'_> {
         let c = &mut self.consume_c;
         let blocks = &self.blocks;
 
@@ -88,7 +88,7 @@ impl ContentSensitiveSplitter {
         r
     }
 
-    fn consume_all(&mut self) -> IoVec {
+    fn consume_all(&mut self) -> IoVec<'_> {
         let c = &mut self.consume_c;
         let mut r = IoVec::new();
         while c.block < self.blocks.len() {
@@ -190,7 +190,6 @@ impl Splitter for ContentSensitiveSplitter {
 #[cfg(test)]
 mod splitter_tests {
     use super::*;
-    use blake2::{Blake2s256, Digest};
     use rand::*;
     use std::collections::BTreeMap;
     use std::io::{BufReader, BufWriter, Read, Write};
@@ -278,6 +277,16 @@ mod splitter_tests {
         hashes: BTreeMap<Hash256, Entry>,
     }
 
+    pub fn blake3_256_iov(iov: &IoVec) -> ([u8; 32], usize) {
+        let mut len = 0usize;
+        let mut h = blake3::Hasher::new();
+        for seg in iov.iter() {
+            len += seg.len();
+            h.update(seg);
+        }
+        (*h.finalize().as_bytes(), len)
+    }
+
     impl TestHandler {
         fn histogram(&self) -> BTreeMap<usize, (u32, u32)> {
             let mut r = BTreeMap::new();
@@ -315,14 +324,8 @@ mod splitter_tests {
         fn handle_data(&mut self, iov: &IoVec) -> Result<()> {
             self.nr_chunks += 1;
 
-            let mut len = 0;
-            let mut hasher = Blake2s256::new();
-            for v in iov {
-                len += v.len();
-                hasher.update(&v[..]);
-            }
-
-            let e = self.hashes.entry(hasher.finalize()).or_default();
+            let (key, len) = blake3_256_iov(iov);
+            let e = self.hashes.entry(key).or_default();
 
             e.hits += 1;
             e.len = len;
@@ -379,6 +382,21 @@ mod splitter_tests {
         assert_eq!(input_buf, output_buf);
     }
 
+    fn open_out(name: &str) -> std::io::Result<std::fs::File> {
+        use std::{
+            fs::{self, OpenOptions},
+            path::PathBuf,
+        };
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // absolute path to crate root
+        dir.push("target"); // or "results", etc.
+        fs::create_dir_all(&dir)?;
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(dir.join(name))
+    }
+
     #[test]
     fn splitter_finds_similar_blocks() {
         let input_buf = prep_data();
@@ -394,7 +412,7 @@ mod splitter_tests {
         }
 
         let lengths = handler.lengths();
-        let mut csv = std::fs::File::create("dedup-lengths.csv").unwrap();
+        let mut csv = open_out("dedup-lengths.csv").unwrap();
         for (len, hits) in lengths {
             writeln!(csv, "{}, {}", len, hits).expect("write failed");
         }

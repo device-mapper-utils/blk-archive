@@ -1,7 +1,5 @@
 use anyhow::{anyhow, Result};
-use blake2::{Blake2b, Digest};
 use byteorder::{LittleEndian, WriteBytesExt};
-use generic_array::typenum::U8;
 use nom::IResult;
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
@@ -88,10 +86,13 @@ pub fn calculate_signature(values: &[usize]) -> u64 {
         .flat_map(|&v| v.to_le_bytes().to_vec())
         .collect();
 
-    let mut hasher = Blake2b::<U8>::new();
+    let mut hasher = blake3::Hasher::new();
     hasher.update(&hash_bytes);
 
-    u64::from_le_bytes(hasher.finalize().into())
+    let mut out = [0u8; 8];
+    hasher.finalize_xof().fill(&mut out);
+
+    u64::from_le_bytes(out)
 }
 
 impl CuckooFilter {
@@ -103,7 +104,10 @@ impl CuckooFilter {
         // Ensure that the scatter is identical every time it's constructed
         // We cannot use the DefaultHasher as it's documented to not be consistent across
         // versions/time
-        assert!(4224213928824907068 == calculate_signature(scatter.as_slice()));
+        assert_eq!(
+            10574224884969461125,
+            calculate_signature(scatter.as_slice())
+        );
 
         scatter
     }

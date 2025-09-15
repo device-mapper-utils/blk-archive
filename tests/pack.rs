@@ -89,7 +89,7 @@ fn pack_random_verify_stats() -> Result<()> {
     let mut rng = rand::thread_rng();
 
     for _ in 0..10 {
-        let r_increase = rng.gen_range(1024..archive::SLAB_SIZE_TARGET);
+        let r_increase = rng.gen_range(1024..archive::file_based::SLAB_SIZE_TARGET);
         let size = file_size_start + r_increase as u64;
 
         pack_common_verify_stats(size, Pattern::LCG)?;
@@ -98,7 +98,7 @@ fn pack_random_verify_stats() -> Result<()> {
     for s in vec![
         file_size_start,
         file_size_start - 10,
-        file_size_start + archive::SLAB_SIZE_TARGET as u64 + 10,
+        file_size_start + archive::file_based::SLAB_SIZE_TARGET as u64 + 10,
     ] {
         pack_common_verify_stats(s, Pattern::LCG)?;
     }

@@ -31,7 +31,7 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     let mut streams = Vec::new();
     for id in stream_ids {
         let cfg = config::read_stream_config(&id)?;
-        streams.push((id, config::to_date_time(&cfg.pack_time), cfg));
+        streams.push((id, config::to_date_time(&cfg.pack_time)?, cfg));
     }
 
     streams.sort_by(|l, r| l.1.cmp(&r.1));

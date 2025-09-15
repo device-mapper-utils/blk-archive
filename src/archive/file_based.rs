@@ -1,14 +1,15 @@
 use anyhow::Result;
+use std::io::Write;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 
-use crate::cuckoo_filter::*;
+use crate::archive::data::{complete_slab, complete_slab_, Store};
+use crate::cuckoo_filter::{CuckooFilter, InsertResult};
 use crate::hash::*;
 use crate::hash_index::*;
 use crate::iovec::*;
 use crate::paths;
 use crate::slab::*;
-use std::io::Write;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
 
 pub const SLAB_SIZE_TARGET: usize = 4 * 1024 * 1024;
 
@@ -16,7 +17,7 @@ pub struct Data {
     seen: CuckooFilter,
     hashes: lru::LruCache<u32, ByHash>,
 
-    data_file: SlabFile,
+    data_file: Box<SlabFile>,
     hashes_file: Arc<Mutex<SlabFile>>,
 
     current_slab: u32,
@@ -29,24 +30,96 @@ pub struct Data {
     slabs: lru::LruCache<u32, ByIndex>,
 }
 
-fn complete_slab_(slab: &mut SlabFile, buf: &mut Vec<u8>) -> Result<()> {
-    slab.write_slab(buf)?;
-    buf.clear();
-    Ok(())
-}
+impl Store for Data {
+    // Returns the (slab, entry) for the IoVec which may/may not already exist.
+    fn data_add(&mut self, h: Hash256, iov: &IoVec, len: u64) -> Result<((u32, u32), u64)> {
+        // There is an inherent race condition between checking if we have it and adding it,
+        // check before we add when this functionality ends up on a server side.
+        if let Some(location) = self.is_known(&h)? {
+            return Ok((location, 0));
+        }
 
-pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: usize) -> Result<bool> {
-    if buf.len() > threshold {
-        complete_slab_(slab, buf)?;
-        Ok(true)
-    } else {
-        Ok(false)
+        // Add entry to cuckoo filter, not checking return value as we could get indication that
+        // it's "PossiblyPresent" when our logical expectation is "Inserted".
+        let key = hash_le_u64(&h);
+        self.seen
+            .test_and_set(key, self.current_slab)
+            .or_else(|_| {
+                let new_cap = self.seen.capacity() * 2;
+                self.rebuild_index(new_cap)?;
+                self.seen.test_and_set(key, self.current_slab)
+            })?;
+
+        if self.data_buf.len() as u64 + len > SLAB_SIZE_TARGET as u64 {
+            self.complete_data_slab()?;
+        }
+
+        let r = (self.current_slab, self.current_entries as u32);
+        for v in iov {
+            self.data_buf.extend_from_slice(v);
+        }
+        self.current_entries += 1;
+        self.current_index.insert(h, len as usize);
+        Ok((r, len))
+    }
+
+    // Have we seen this hash before, if we have we will return the slab and offset
+    // Note: This function does not modify any state
+    fn is_known(&mut self, h: &Hash256) -> Result<Option<(u32, u32)>> {
+        let mini_hash = hash_le_u64(h);
+        let rc = match self.seen.test(mini_hash)? {
+            // This is a possibly in set
+            InsertResult::PossiblyPresent(s) => {
+                if self.current_slab == s {
+                    if let Some(offset) = self.current_index.lookup(h) {
+                        Some((self.current_slab, offset))
+                    } else {
+                        None
+                    }
+                } else {
+                    let hi = self.get_hash_index(s)?;
+                    hi.lookup(h).map(|offset| (s, offset as u32))
+                }
+            }
+            _ => None,
+        };
+        Ok(rc)
+    }
+
+    fn data_get(
+        &mut self,
+        slab: u32,
+        offset: u32,
+        nr_entries: u32,
+        partial: Option<(u32, u32)>,
+    ) -> Result<(Arc<Vec<u8>>, usize, usize)> {
+        let info = self.get_info(slab)?;
+        let (data_begin, data_end) = Self::calculate_offsets(offset, nr_entries, info, partial);
+        let data = self.data_file.read(slab)?;
+
+        Ok((data, data_begin, data_end))
+    }
+
+    // Not used at the moment, but was used for the send/receive POC.  This was being called after
+    // we received the newly created stream file for a pack operation.  The reason this is done is
+    // until you complete a slab, you cannot locate it in the data_get path for unpack operation.
+    fn flush(&mut self) -> Result<()> {
+        self.complete_data_slab()
+    }
+
+    fn ensure_extra_capacity(&mut self, blocks: usize) -> Result<()> {
+        if self.seen.capacity() < self.seen.len() + blocks {
+            self.rebuild_index(self.seen.len() + blocks)?;
+            eprintln!("resized index to {}", self.seen.capacity());
+        }
+
+        Ok(())
     }
 }
 
 impl Data {
     pub fn new(
-        data_file: SlabFile,
+        data_file: Box<SlabFile>,
         hashes_file: Arc<Mutex<SlabFile>>,
         slab_capacity: usize,
     ) -> Result<Self> {
@@ -81,15 +154,6 @@ impl Data {
             let hashes = hf.read(slab)?;
             ByIndex::new(hashes)
         })
-    }
-
-    pub fn ensure_extra_capacity(&mut self, blocks: usize) -> Result<()> {
-        if self.seen.capacity() < self.seen.len() + blocks {
-            self.rebuild_index(self.seen.len() + blocks)?;
-            eprintln!("resized index to {}", self.seen.capacity());
-        }
-
-        Ok(())
     }
 
     fn get_hash_index(&mut self, slab: u32) -> Result<&ByHash> {
@@ -153,59 +217,6 @@ impl Data {
         Ok(())
     }
 
-    // Returns the (slab, entry) for the IoVec which may/may not already exist.
-    pub fn data_add(&mut self, h: Hash256, iov: &IoVec, len: u64) -> Result<((u32, u32), u64)> {
-        // There is an inherent race condition between checking if we have it and adding it,
-        // check before we add when this functionality ends up on a server side.
-        if let Some(location) = self.is_known(&h)? {
-            return Ok((location, 0));
-        }
-
-        // Add entry to cuckoo filter, not checking return value as we could get indication that
-        // it's "PossiblyPresent" when our logical expectation is "Inserted".
-        let ts_result = self.seen.test_and_set(hash_le_u64(&h), self.current_slab);
-        if ts_result.is_err() {
-            // Exceeded capacity, rebuild with more capacity.
-            let s = self.seen.capacity() * 2;
-            self.rebuild_index(s)?;
-        }
-
-        if self.data_buf.len() as u64 + len > SLAB_SIZE_TARGET as u64 {
-            self.complete_data_slab()?;
-        }
-
-        let r = (self.current_slab, self.current_entries as u32);
-        for v in iov {
-            self.data_buf.extend_from_slice(v);
-        }
-        self.current_entries += 1;
-        self.current_index.insert(h, len as usize);
-        Ok((r, len))
-    }
-
-    // Have we seen this hash before, if we have we will return the slab and offset
-    // Note: This function does not modify any state
-    pub fn is_known(&mut self, h: &Hash256) -> Result<Option<(u32, u32)>> {
-        let mini_hash = hash_le_u64(h);
-        let rc = match self.seen.test(mini_hash)? {
-            // This is a possibly in set
-            InsertResult::PossiblyPresent(s) => {
-                if self.current_slab == s {
-                    if let Some(offset) = self.current_index.lookup(h) {
-                        Some((self.current_slab, offset))
-                    } else {
-                        None
-                    }
-                } else {
-                    let hi = self.get_hash_index(s)?;
-                    hi.lookup(h).map(|offset| (s, offset as u32))
-                }
-            }
-            _ => None,
-        };
-        Ok(rc)
-    }
-
     // NOTE: This won't work for multiple clients and one server!
     pub fn file_sizes(&mut self) -> (u64, u64) {
         let hashes_written = {
@@ -222,6 +233,37 @@ impl Data {
         info: &ByIndex,
         partial: Option<(u32, u32)>,
     ) -> (usize, usize) {
+        // My understanding, maybe inaccurate ...
+        //
+        // Data from de-duplicated files is stored in a single "slab file." Each appended
+        // slab has the following structure:
+        //
+        //     [ SLAB_MAGIC | length | checksum | chunk1 | chunk2 | ... ]
+        //
+        // A slab consists of multiple chunks. Once the pending data reaches ≥ 4 MiB,
+        // the slab is flushed to the slab file, and the corresponding hash metadata
+        // is written to the "hashes" file (which also uses the slab format).
+        //
+        // Data retrieval (data_get):
+        // - For a given slab, we load the ByIndex metadata, which provides the start
+        //   and end offsets of each chunk along with its expected hash.
+        // - The `offset` parameter identifies which chunk (N) to fetch.
+        // - The `nr_entries` parameter specifies how many consecutive chunks to fetch.
+        //   Typically we retrieve a single chunk, but when `nr_entries > 1` (e.g. for
+        //   delta operations), we return the contiguous region from the start of the
+        //   first chunk through the end of the last.
+        //
+        // Partial retrievals:
+        // - A request may only cover part of the contiguous region.
+        // - In this case, we adjust the calculated `data_start` and `data_end` offsets
+        //   accordingly to return only the requested portion.
+        //
+        // Notes:
+        // - This logic should be validated with thorough testing.
+        // - Slabs on persistent storage shall remain contiguous (chunk-to-chunk)
+        //   as the interface in data_get requires it or requires it simulates it when
+        //   using nr_entries.
+
         let (data_begin, data_end) = if nr_entries == 1 {
             let (data_begin, data_end, _expected_hash) = info.get(offset as usize).unwrap();
             (*data_begin as usize, *data_end as usize)
@@ -240,27 +282,6 @@ impl Data {
         } else {
             (data_begin, data_end)
         }
-    }
-
-    pub fn data_get(
-        &mut self,
-        slab: u32,
-        offset: u32,
-        nr_entries: u32,
-        partial: Option<(u32, u32)>,
-    ) -> Result<(Arc<Vec<u8>>, usize, usize)> {
-        let info = self.get_info(slab)?;
-        let (data_begin, data_end) = Self::calculate_offsets(offset, nr_entries, info, partial);
-        let data = self.data_file.read(slab)?;
-
-        Ok((data, data_begin, data_end))
-    }
-
-    // Not used at the moment, but was used for the send/receive POC.  This was being called after
-    // we received the newly created stream file for a pack operation.  The reason this is done is
-    // until you complete a slab, you cannot locate it in the data_get path for unpack operation.
-    pub fn flush(&mut self) -> Result<()> {
-        self.complete_data_slab()
     }
 
     fn sync_and_close(&mut self) {

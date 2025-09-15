@@ -354,7 +354,9 @@ fn find_device(major: u32, minor: u32) -> Option<PathBuf> {
 
     for device in enumerator.scan_devices().unwrap() {
         if let Some(devnum) = device.devnum() {
+            #[allow(unused_unsafe)]
             let found_major = unsafe { libc::major(devnum) };
+            #[allow(unused_unsafe)]
             let found_minor = unsafe { libc::minor(devnum) };
 
             if found_major == major && found_minor == minor {
