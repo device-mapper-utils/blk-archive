@@ -84,8 +84,8 @@ pub fn now() -> String {
     dt.to_rfc3339()
 }
 
-pub fn to_date_time(t: &str) -> chrono::DateTime<FixedOffset> {
-    DateTime::parse_from_rfc3339(t).unwrap()
+pub fn to_date_time(t: &str) -> Result<chrono::DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(t).with_context(|| format!("Failed to parse datetime: {}", t))
 }
 
 //-----------------------------------------
