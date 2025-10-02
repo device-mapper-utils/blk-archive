@@ -36,18 +36,16 @@ trait UnpackDest {
     fn complete(&mut self) -> Result<String>;
 }
 
-struct Unpacker<D: UnpackDest> {
+struct Unpacker<D: UnpackDest, S: SlabStorage = SlabFile> {
     stream_file: SlabFile,
-    archive: archive::Data,
+    archive: archive::Data<S>,
     dest: D,
 }
 
-impl<D: UnpackDest> Unpacker<D> {
+impl<D: UnpackDest> Unpacker<D, MultiFile> {
     // Assumes current directory is the root of the archive.
     fn new(stream: &str, cache_nr_entries: usize, dest: D) -> Result<Self> {
-        let data_file = SlabFileBuilder::open(data_path())
-            .cache_nr_entries(cache_nr_entries)
-            .build()?;
+        let data_file = MultiFile::open_for_read(data_path(), cache_nr_entries)?;
         let hashes_file = Arc::new(Mutex::new(SlabFileBuilder::open(hashes_path()).build()?));
         let stream_file = SlabFileBuilder::open(stream_path(stream)).build()?;
 
@@ -57,7 +55,9 @@ impl<D: UnpackDest> Unpacker<D> {
             dest,
         })
     }
+}
 
+impl<D: UnpackDest, S: SlabStorage> Unpacker<D, S> {
     fn unpack_entry(&mut self, e: &MapEntry) -> Result<()> {
         use MapEntry::*;
         match e {

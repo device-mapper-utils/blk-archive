@@ -5,6 +5,7 @@ use crate::hash::*;
 use crate::hash_index::*;
 use crate::iovec::*;
 use crate::paths;
+use crate::slab::MultiFile;
 use crate::slab::*;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -12,11 +13,11 @@ use std::sync::{Arc, Mutex};
 
 pub const SLAB_SIZE_TARGET: usize = 4 * 1024 * 1024;
 
-pub struct Data {
+pub struct Data<S: SlabStorage = MultiFile> {
     seen: CuckooFilter,
     hashes: lru::LruCache<u32, ByHash>,
 
-    data_file: SlabFile,
+    data_file: S,
     hashes_file: Arc<Mutex<SlabFile>>,
 
     current_slab: u32,
@@ -29,13 +30,17 @@ pub struct Data {
     slabs: lru::LruCache<u32, ByIndex>,
 }
 
-fn complete_slab_(slab: &mut SlabFile, buf: &mut Vec<u8>) -> Result<()> {
+fn complete_slab_<S: SlabStorage>(slab: &mut S, buf: &mut Vec<u8>) -> Result<()> {
     slab.write_slab(buf)?;
     buf.clear();
     Ok(())
 }
 
-pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: usize) -> Result<bool> {
+pub fn complete_slab<S: SlabStorage>(
+    slab: &mut S,
+    buf: &mut Vec<u8>,
+    threshold: usize,
+) -> Result<bool> {
     if buf.len() > threshold {
         complete_slab_(slab, buf)?;
         Ok(true)
@@ -44,19 +49,22 @@ pub fn complete_slab(slab: &mut SlabFile, buf: &mut Vec<u8>, threshold: usize) -
     }
 }
 
-impl Data {
+impl<S: SlabStorage> Data<S> {
     pub fn new(
-        data_file: SlabFile,
+        data_file: S,
         hashes_file: Arc<Mutex<SlabFile>>,
         slab_capacity: usize,
     ) -> Result<Self> {
         let seen = CuckooFilter::read(paths::index_path())?;
         let hashes = lru::LruCache::new(NonZeroUsize::new(slab_capacity).unwrap());
-        let nr_slabs = data_file.get_nr_slabs() as u32;
+        let nr_slabs = data_file.get_nr_slabs();
 
         {
             let hashes_file = hashes_file.lock().unwrap();
-            assert_eq!(data_file.get_nr_slabs(), hashes_file.get_nr_slabs());
+            assert_eq!(
+                data_file.get_nr_slabs() as usize,
+                hashes_file.get_nr_slabs()
+            );
         }
 
         let slabs = lru::LruCache::new(NonZeroUsize::new(slab_capacity).unwrap());
@@ -146,7 +154,8 @@ impl Data {
             self.hashes.put(self.current_slab, index);
 
             let mut hashes_file = self.hashes_file.lock().unwrap();
-            complete_slab_(&mut hashes_file, &mut self.hashes_buf)?;
+            hashes_file.write_slab(&self.hashes_buf)?;
+            self.hashes_buf.clear();
             self.current_slab += 1;
             self.current_entries = 0;
         }
@@ -281,7 +290,7 @@ impl Data {
     }
 }
 
-impl Drop for Data {
+impl<S: SlabStorage> Drop for Data<S> {
     fn drop(&mut self) {
         self.sync_and_close();
     }

@@ -74,7 +74,7 @@ struct DedupStats {
     fill_size: u64,
 }
 
-struct DedupHandler {
+struct DedupHandler<S: SlabStorage = SlabFile> {
     nr_chunks: usize,
 
     stream_file: SlabFile,
@@ -83,14 +83,14 @@ struct DedupHandler {
     mapping_builder: Arc<Mutex<dyn Builder>>,
 
     stats: DedupStats,
-    archive: Data,
+    archive: Data<S>,
 }
 
-impl DedupHandler {
+impl<S: SlabStorage> DedupHandler<S> {
     fn new(
         stream_file: SlabFile,
         mapping_builder: Arc<Mutex<dyn Builder>>,
-        archive: Data,
+        archive: Data<S>,
     ) -> Result<Self> {
         let stats = DedupStats::default();
 
@@ -139,7 +139,7 @@ impl DedupHandler {
     }
 }
 
-impl IoVecHandler for DedupHandler {
+impl<S: SlabStorage> IoVecHandler for DedupHandler<S> {
     fn handle_data(&mut self, iov: &IoVec) -> Result<()> {
         self.nr_chunks += 1;
         let len = iov_len_(iov);
@@ -296,11 +296,12 @@ impl Packer {
     fn pack(mut self, hashes_file: Arc<Mutex<SlabFile>>) -> Result<()> {
         let mut splitter = ContentSensitiveSplitter::new(self.block_size as u32);
 
-        let data_file = SlabFileBuilder::open(data_path())
-            .write(true)
-            .queue_depth(128)
-            .build()
-            .context("couldn't open data slab file")?;
+        let hashes_per_slab = std::cmp::max(SLAB_SIZE_TARGET / self.block_size, 1);
+        let slab_capacity = ((self.hash_cache_size_meg * 1024 * 1024)
+            / std::mem::size_of::<Hash256>())
+            / hashes_per_slab;
+
+        let data_file = MultiFile::open_for_write(data_path(), 128, slab_capacity)?;
 
         let (stream_id, mut stream_path) = new_stream_path()?;
 
@@ -313,12 +314,7 @@ impl Packer {
             .build()
             .context("couldn't open stream slab file")?;
 
-        let hashes_per_slab = std::cmp::max(SLAB_SIZE_TARGET / self.block_size, 1);
-        let slab_capacity = ((self.hash_cache_size_meg * 1024 * 1024)
-            / std::mem::size_of::<Hash256>())
-            / hashes_per_slab;
-
-        let ad: Data = Data::new(data_file, hashes_file, slab_capacity)?;
+        let ad = Data::new(data_file, hashes_file, slab_capacity)?;
 
         let mut handler = DedupHandler::new(stream_file, self.mapping_builder.clone(), ad)?;
 

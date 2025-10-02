@@ -11,7 +11,7 @@ use crate::config::*;
 use crate::cuckoo_filter::*;
 use crate::paths;
 use crate::paths::*;
-use crate::slab::builder::*;
+use crate::slab::{builder::*, MultiFile};
 
 //-----------------------------------------
 
@@ -108,10 +108,7 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
     std::env::set_current_dir(dir)?;
 
     // Create empty data and hash slab files
-    let mut data_file = SlabFileBuilder::create(data_path())
-        .queue_depth(1)
-        .compressed(data_compression)
-        .build()?;
+    let mut data_file = MultiFile::create(data_path(), 1, data_compression, 1)?;
     data_file.close()?;
 
     let mut hashes_file = SlabFileBuilder::create(hashes_path())

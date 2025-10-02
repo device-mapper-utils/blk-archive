@@ -13,6 +13,7 @@ use crate::hash::*;
 use crate::slab::compression_service::*;
 use crate::slab::data_cache::*;
 use crate::slab::offsets::*;
+use crate::slab::storage::*;
 
 #[cfg(test)]
 mod tests;
@@ -54,7 +55,7 @@ struct SlabShared {
 
 // FIXME: add index file
 pub struct SlabFile {
-    compressed: bool,
+    pub compressed: bool,
     compressor: Option<CompressionService>,
     offsets_path: PathBuf,
     pending_index: u64,
@@ -409,6 +410,32 @@ impl SlabFile {
 
     pub fn misses(&self) -> u64 {
         self.data_cache.misses
+    }
+}
+
+impl SlabStorage for SlabFile {
+    fn write_slab(&mut self, data: &[u8]) -> Result<()> {
+        self.write_slab(data)
+    }
+
+    fn read(&mut self, slab: u32) -> Result<Arc<Vec<u8>>> {
+        self.read(slab)
+    }
+
+    fn close(&mut self) -> Result<()> {
+        self.close()
+    }
+
+    fn get_nr_slabs(&self) -> u32 {
+        self.get_nr_slabs() as u32
+    }
+
+    fn index(&self) -> u32 {
+        self.index() as u32
+    }
+
+    fn get_file_size(&self) -> u64 {
+        self.get_file_size()
     }
 }
 
