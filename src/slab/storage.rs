@@ -15,6 +15,10 @@ pub trait SlabStorage {
     /// Returns the slab data wrapped in an Arc for efficient sharing
     fn read(&mut self, slab: u32) -> Result<Arc<Vec<u8>>>;
 
+    /// Sync all pending writes to disk without closing
+    /// Returns an error if the sync fails
+    fn sync_all(&mut self) -> Result<()>;
+
     /// Close the storage, flushing any pending writes
     fn close(&mut self) -> Result<()>;
 

@@ -23,9 +23,11 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
 
     env::set_current_dir(&archive_dir)?;
 
-    let paths = fs::read_dir(Path::new("./streams"))?;
+    let streams_path = Path::new("./streams");
+    let paths = fs::read_dir(streams_path)?;
     let stream_ids = paths
         .filter_map(|entry| entry.ok().and_then(|e| e.file_name().into_string().ok()))
+        .filter(|name| !name.starts_with(".tmp_")) // Skip temporary directories
         .collect::<Vec<String>>();
 
     let mut streams = Vec::new();

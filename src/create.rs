@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::ArgMatches;
 use std::fs;
 use std::fs::OpenOptions;
@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thinp::report::*;
 
-use crate::config::*;
 use crate::cuckoo_filter::*;
 use crate::paths;
 use crate::paths::*;
 use crate::slab::{builder::*, MultiFile};
+use crate::{config::*, cuckoo_filter};
 
 //-----------------------------------------
 
@@ -99,7 +99,7 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
     let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
     let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
 
-    fs::create_dir(dir)?;
+    fs::create_dir(dir).with_context(|| format!("Unable to create archive {:?}", dir))?;
     write_config(dir, block_size, hash_cache_size_meg, data_cache_size_meg)?;
     create_sub_dir(dir, "data")?;
     create_sub_dir(dir, "streams")?;
@@ -118,8 +118,17 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
     hashes_file.close()?;
 
     // Write empty index
-    let index = CuckooFilter::with_capacity(1 << 10);
+    let index = CuckooFilter::with_capacity(cuckoo_filter::INITIAL_SIZE);
     index.write(paths::index_path())?;
+
+    // Sync all files to disk before creating checkpoint
+    let cwd = std::env::current_dir()?;
+    crate::recovery::sync_archive(&cwd, 0)?;
+
+    // Create initial recovery checkpoint
+    let checkpoint_path = cwd.join(crate::recovery::check_point_file());
+    let checkpoint = crate::recovery::create_checkpoint_from_files(&cwd, 0)?;
+    checkpoint.write(checkpoint_path)?;
 
     Ok(())
 }

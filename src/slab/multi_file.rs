@@ -46,7 +46,7 @@ pub fn path_for_global_slab(base_path: &Path, global_slab: u32) -> PathBuf {
 // FileHandleCache - LRU cache for open file handles
 
 struct FileHandleCache {
-    handles: HashMap<u32, SlabFile>,
+    handles: HashMap<u32, SlabFile<'static>>,
     access_order: Vec<u32>,
     max_open_files: usize,
     base_path: PathBuf,
@@ -64,7 +64,7 @@ impl FileHandleCache {
         }
     }
 
-    fn get_file(&mut self, file_id: u32) -> Result<&mut SlabFile> {
+    fn get_file(&mut self, file_id: u32) -> Result<&mut SlabFile<'static>> {
         // Update access order for LRU
         if let Some(pos) = self.access_order.iter().position(|&x| x == file_id) {
             self.access_order.remove(pos);
@@ -122,6 +122,21 @@ fn discover_existing_files(base_path: &Path) -> Result<(u32, u32)> {
     Ok((file_id, total_slabs))
 }
 
+pub fn current_active_data_slab(base_path: &Path) -> Result<PathBuf> {
+    let mut file_id = 0;
+    let mut last_data_file = PathBuf::new();
+    loop {
+        let file_path = file_id_to_path(base_path, file_id);
+        if !file_path.exists() {
+            break;
+        }
+        last_data_file = file_path;
+        file_id += 1;
+    }
+
+    Ok(last_data_file)
+}
+
 fn count_slabs_in_file(file_path: &Path) -> Result<u32> {
     let slab_file = SlabFile::open_for_read(file_path, 1)?;
     Ok(slab_file.get_nr_slabs() as u32)
@@ -134,7 +149,7 @@ pub struct MultiFile {
     base_path: PathBuf,
 
     // Current file being written to
-    write_file: Option<SlabFile>,
+    write_file: Option<SlabFile<'static>>,
     write_file_id: u32,
     write_file_slab_count: u32,
 
@@ -149,6 +164,26 @@ pub struct MultiFile {
 }
 
 impl MultiFile {
+    pub fn fix_data_file_slab_indexes(base_path: &Path) -> Result<()> {
+        let mut file_id = 0;
+
+        loop {
+            let file_path = file_id_to_path(base_path, file_id);
+            if !file_path.exists() {
+                break;
+            }
+
+            // Lets just re-generate and move on...
+            let mut slab_offsets = regenerate_index(file_path, None)?;
+            slab_offsets.write_offset_file(true)?;
+            drop(slab_offsets);
+
+            file_id += 1;
+        }
+
+        Ok(())
+    }
+
     pub fn create<P: AsRef<Path>>(
         base_path: P,
         queue_depth: usize,
@@ -295,6 +330,15 @@ impl MultiFile {
         file.read(local_slab)
     }
 
+    /// Sync all pending writes to disk without closing
+    pub fn sync_all(&mut self) -> Result<()> {
+        // Sync current write file if it exists
+        if let Some(ref mut file) = self.write_file {
+            file.sync_all()?;
+        }
+        Ok(())
+    }
+
     pub fn close(&mut self) -> Result<()> {
         // Close current write file
         if let Some(mut file) = self.write_file.take() {
@@ -337,6 +381,10 @@ impl SlabStorage for MultiFile {
 
     fn read(&mut self, slab: u32) -> Result<std::sync::Arc<Vec<u8>>> {
         self.read(slab)
+    }
+
+    fn sync_all(&mut self) -> Result<()> {
+        self.sync_all()
     }
 
     fn close(&mut self) -> Result<()> {
@@ -478,9 +526,9 @@ mod tests {
         let mut mf = MultiFile::create(&base_path, 4, false, 10).unwrap();
 
         // Write some slabs
-        let data1 = vec![1u8; SLAB_SIZE_TARGET as usize];
-        let data2 = vec![2u8; SLAB_SIZE_TARGET as usize];
-        let data3 = vec![3u8; SLAB_SIZE_TARGET as usize];
+        let data1 = vec![1u8; SLAB_SIZE_TARGET];
+        let data2 = vec![2u8; SLAB_SIZE_TARGET];
+        let data3 = vec![3u8; SLAB_SIZE_TARGET];
 
         mf.write_slab(&data1).unwrap();
         mf.write_slab(&data2).unwrap();
@@ -509,7 +557,7 @@ mod tests {
         let mut mf = MultiFile::create(&base_path, 4, true, 10).unwrap();
 
         // Write a compressible slab (all zeros)
-        let data = vec![0u8; SLAB_SIZE_TARGET as usize];
+        let data = vec![0u8; SLAB_SIZE_TARGET];
         mf.write_slab(&data).unwrap();
 
         // Read it back immediately - works due to pending_writes cache
@@ -527,7 +575,7 @@ mod tests {
         // Create and write some data
         {
             let mut mf = MultiFile::create(&base_path, 4, false, 10).unwrap();
-            let data = vec![42u8; SLAB_SIZE_TARGET as usize];
+            let data = vec![42u8; SLAB_SIZE_TARGET];
             mf.write_slab(&data).unwrap();
             mf.write_slab(&data).unwrap();
             mf.close().unwrap();
@@ -538,7 +586,7 @@ mod tests {
         assert_eq!(mf.get_nr_slabs(), 2);
 
         // Write more data
-        let data = vec![99u8; SLAB_SIZE_TARGET as usize];
+        let data = vec![99u8; SLAB_SIZE_TARGET];
         mf.write_slab(&data).unwrap();
         assert_eq!(mf.get_nr_slabs(), 3);
 
@@ -560,7 +608,7 @@ mod tests {
         {
             let mut mf = MultiFile::create(base_path, 1, false, 10).unwrap();
             for i in 0..5 {
-                let data = vec![i as u8; SLAB_SIZE_TARGET as usize];
+                let data = vec![i as u8; SLAB_SIZE_TARGET];
                 mf.write_slab(&data).unwrap();
             }
             mf.close().unwrap();
@@ -593,7 +641,7 @@ mod tests {
         // Writing that many would be too slow, so write just enough to test the logic
 
         for i in 0..num_slabs {
-            let data = vec![(i % 256) as u8; SLAB_SIZE_TARGET as usize];
+            let data = vec![(i % 256) as u8; SLAB_SIZE_TARGET];
             mf.write_slab(&data).unwrap();
         }
 
@@ -687,7 +735,7 @@ mod tests {
         assert!(initial_size > 0);
 
         // Write a slab
-        let data = vec![1u8; SLAB_SIZE_TARGET as usize];
+        let data = vec![1u8; SLAB_SIZE_TARGET];
         mf.write_slab(&data).unwrap();
 
         // Close to flush writes
@@ -709,7 +757,7 @@ mod tests {
 
         assert_eq!(mf.index(), 0);
 
-        let data = vec![1u8; SLAB_SIZE_TARGET as usize];
+        let data = vec![1u8; SLAB_SIZE_TARGET];
         mf.write_slab(&data).unwrap();
         assert_eq!(mf.index(), 1);
 
@@ -755,7 +803,7 @@ mod tests {
                 Box::new(MultiFile::create(&base_path, 1, false, 10).unwrap());
 
             // Test trait methods
-            let data = vec![7u8; SLAB_SIZE_TARGET as usize];
+            let data = vec![7u8; SLAB_SIZE_TARGET];
             mf.write_slab(&data).unwrap();
 
             assert_eq!(mf.get_nr_slabs(), 1);
@@ -770,7 +818,7 @@ mod tests {
             let mut mf: Box<dyn SlabStorage> =
                 Box::new(MultiFile::open_for_read(&base_path, 10).unwrap());
 
-            let data = vec![7u8; SLAB_SIZE_TARGET as usize];
+            let data = vec![7u8; SLAB_SIZE_TARGET];
             let read_data = mf.read(0).unwrap();
             assert_eq!(*read_data, data);
         }
@@ -1028,6 +1076,89 @@ mod tests {
         for slab_id in 0..total_slabs {
             let data = mf.read(slab_id as u32).unwrap();
             assert_eq!(data.len(), SLAB_SIZE_TARGET);
+        }
+    }
+
+    /// Test: Write, sync, read pattern
+    ///
+    /// Ensures sync_all() properly commits data and clears pending_writes,
+    /// and reads still work after sync.
+    #[test]
+    fn test_sync_and_read() {
+        let num_slabs = 10;
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path().to_path_buf();
+
+        let mut mf = MultiFile::create(&base_path, 10, true, 10).unwrap();
+
+        // Write some slabs
+        for i in 0..num_slabs {
+            let data = vec![i as u8; SLAB_SIZE_TARGET];
+            mf.write_slab(&data).unwrap();
+        }
+
+        // Read before sync (uses pending_writes)
+        for i in 0..num_slabs {
+            let data = mf.read(i).unwrap();
+            assert_eq!(data[0], i as u8);
+        }
+
+        // Sync to commit
+        mf.sync_all().unwrap();
+
+        // Read after sync (should read from disk)
+        for i in 0..num_slabs {
+            let data = mf.read(i).unwrap();
+            assert_eq!(data[0], i as u8);
+        }
+
+        // Write more and read (uses pending_writes again)
+        for i in num_slabs..num_slabs * 2 {
+            let data = vec![i as u8; SLAB_SIZE_TARGET];
+            mf.write_slab(&data).unwrap();
+            let read_data = mf.read(i).unwrap();
+            assert_eq!(read_data[0], i as u8);
+        }
+    }
+
+    /// Test: Sync atomicity
+    ///
+    /// Ensures that sync_all() atomically syncs data and offsets under lock,
+    /// preventing the race where offsets include slabs whose data isn't synced.
+    #[test]
+    fn test_sync_atomicity() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path().to_path_buf();
+
+        let mut mf = MultiFile::create(&base_path, 4, false, 10).unwrap();
+
+        // Write some data
+        for i in 0..5 {
+            let data = vec![i as u8; SLAB_SIZE_TARGET];
+            mf.write_slab(&data).unwrap();
+        }
+
+        // First sync
+        mf.sync_all().unwrap();
+
+        // Write more
+        for i in 5..10 {
+            let data = vec![i as u8; SLAB_SIZE_TARGET];
+            mf.write_slab(&data).unwrap();
+        }
+
+        // Second sync
+        mf.sync_all().unwrap();
+
+        // Close and reopen
+        mf.close().unwrap();
+        let mut mf = MultiFile::open_for_read(&base_path, 10).unwrap();
+
+        // All 10 slabs should be readable
+        assert_eq!(mf.get_nr_slabs(), 10);
+        for i in 0..10 {
+            let data = mf.read(i).unwrap();
+            assert_eq!(data[0], i as u8, "Slab {} not persisted correctly", i);
         }
     }
 }

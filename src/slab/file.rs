@@ -33,11 +33,13 @@ mod tests;
 
 const FILE_MAGIC: u64 = 0xb927f96a6b611180;
 const SLAB_MAGIC: u64 = 0x20565137a3100a7c;
+const SLAB_FILE_HDR_LEN: u64 = 16;
+const SLAB_HDR_LEN: u64 = 24;
 
 const FORMAT_VERSION: u32 = 0;
 
 pub type SlabIndex = u64;
-type Shared = Arc<(Mutex<SlabShared>, Condvar)>;
+type Shared<'a> = Arc<(Mutex<SlabShared<'a>>, Condvar)>;
 
 pub const SLAB_META_SIZE: u64 = 24; // Slab magic + length + check sum, each of which is 8 bytes
 
@@ -53,9 +55,9 @@ pub struct SlabData {
     pub data: Vec<u8>,
 }
 
-struct SlabShared {
+struct SlabShared<'a> {
     data: File,
-    offsets: SlabOffsets,
+    offsets: SlabOffsets<'a>,
     file_size: u64,
 
     progress: Progress,
@@ -65,13 +67,13 @@ struct SlabShared {
 }
 
 // FIXME: add index file
-pub struct SlabFile {
+pub struct SlabFile<'a> {
     pub compressed: bool,
     compressor: Option<CompressionService>,
     offsets_path: PathBuf,
     pending_index: u64,
 
-    shared: Shared,
+    shared: Shared<'a>,
 
     tx: Option<SyncSender<SlabData>>,
     tid: Option<thread::JoinHandle<()>>,
@@ -79,7 +81,7 @@ pub struct SlabFile {
     data_cache: DataCache,
 }
 
-impl Drop for SlabFile {
+impl<'a> Drop for SlabFile<'a> {
     fn drop(&mut self) {
         let mut tx = None;
         std::mem::swap(&mut tx, &mut self.tx);
@@ -99,7 +101,7 @@ fn write_slab(shared: &Mutex<SlabShared>, data: &[u8]) -> Result<()> {
     let mut shared = shared.lock().unwrap();
 
     let offset = shared.file_size;
-    shared.offsets.offsets.push(offset);
+    shared.offsets.append(offset);
     shared.file_size += 8 + 8 + 8 + data.len() as u64;
 
     shared.data.seek(SeekFrom::End(0))?;
@@ -140,6 +142,98 @@ fn writer_(shared: &Shared, rx: Receiver<SlabData>, start_index: u64) -> Result<
 fn writer(shared: &Shared, rx: Receiver<SlabData>, start_index: u64) {
     // FIXME: pass on error
     writer_(shared, rx, start_index).expect("write of slab failed");
+}
+
+pub fn regenerate_index<'a, P: AsRef<Path>>(
+    data_path: P,
+    check_len: Option<u64>,
+) -> Result<SlabOffsets<'a>> {
+    let slab_name = data_path.as_ref().to_path_buf();
+    let slab_offsets_name = offsets_path(slab_name.clone());
+
+    let mut data = OpenOptions::new()
+        .read(true)
+        .write(false)
+        .create(false)
+        .open(data_path)?;
+
+    let file_size = match check_len {
+        Some(len) => len,
+        None => data.metadata()?.len(),
+    };
+
+    if file_size < crate::slab::file::SLAB_FILE_HDR_LEN {
+        return Err(anyhow!(
+            "slab file {} isn't large enough to be a slab file, size = {file_size} bytes.",
+            slab_name.to_string_lossy()
+        ));
+    }
+
+    let mut so = SlabOffsets::open(slab_offsets_name, true)?;
+    let _flags = read_slab_header(&mut data)?;
+
+    // We don't have any additional data in an empty archive
+    let mut curr_offset = data.stream_position()?;
+    assert!(curr_offset == SLAB_FILE_HDR_LEN);
+
+    if curr_offset == file_size {
+        return Ok(so);
+    }
+
+    so.append(SLAB_FILE_HDR_LEN);
+    let mut slab_index = 0;
+
+    loop {
+        let remaining = file_size - curr_offset;
+        if remaining < SLAB_HDR_LEN {
+            return Err(anyhow!(
+                "Slab {slab_index} is incomplete, not enough remaining for header, \
+                {remaining} remaining bytes."
+            ));
+        }
+
+        let magic = data.read_u64::<LittleEndian>()?;
+        let len = data.read_u64::<LittleEndian>()?;
+
+        if magic != SLAB_MAGIC {
+            return Err(anyhow!(
+                "slab magic incorrect for slab {slab_index} for file {}",
+                slab_name.to_string_lossy()
+            ));
+        }
+
+        let mut expected_csum: Hash64 = Hash64::default();
+        data.read_exact(&mut expected_csum)?;
+
+        if remaining < SLAB_HDR_LEN + len {
+            return Err(anyhow!(
+                "Slab {slab_index} is incomplete, payload is truncated, \
+                needing {}, remaining {remaining}",
+                SLAB_HDR_LEN + len
+            ));
+        }
+
+        let mut buf = vec![0; len as usize];
+        data.read_exact(&mut buf)?;
+
+        let actual_csum = hash_64(&buf);
+        if actual_csum != expected_csum {
+            return Err(anyhow!(
+                "slab {slab_index} checksum incorrect for file {}!",
+                slab_name.to_string_lossy()
+            ));
+        }
+
+        curr_offset = data.stream_position()?;
+        if curr_offset == file_size {
+            break;
+        }
+
+        slab_index += 1;
+        so.append(curr_offset);
+    }
+
+    Ok(so)
 }
 
 fn offsets_path<P: AsRef<Path>>(p: P) -> PathBuf {
@@ -185,13 +279,16 @@ fn read_slab_header(data: &mut std::fs::File) -> Result<u32> {
     Ok(flags)
 }
 
-impl SlabFile {
+impl<'a> SlabFile<'a> {
     pub(crate) fn create<P: AsRef<Path>>(
         data_path: P,
         queue_depth: usize,
         compressed: bool,
         cache_nr_entries: usize,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        'a: 'static,
+    {
         let offsets_path = offsets_path(&data_path);
 
         let mut data = OpenOptions::new()
@@ -207,7 +304,7 @@ impl SlabFile {
         data.write_u32::<LittleEndian>(FORMAT_VERSION)?;
         data.write_u32::<LittleEndian>(flags)?;
 
-        let offsets = SlabOffsets::default();
+        let offsets = SlabOffsets::open(offsets_path.clone(), true)?; // Truncate to match data file
         let file_size = data.metadata()?.len();
         let shared: Shared = Arc::new((
             Mutex::new(SlabShared {
@@ -251,7 +348,10 @@ impl SlabFile {
         data_path: P,
         queue_depth: usize,
         cache_nr_entries: usize,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        'a: 'static,
+    {
         let offsets_path = offsets_path(&data_path);
 
         let mut data = OpenOptions::new()
@@ -272,9 +372,9 @@ impl SlabFile {
             (None, tx)
         };
 
-        let offsets = SlabOffsets::read_offset_file(&offsets_path)?;
+        let offsets = SlabOffsets::open(&offsets_path, false)?;
         let file_size = data.metadata()?.len();
-        let nr_existing_slabs = offsets.offsets.len() as u64;
+        let nr_existing_slabs = offsets.len() as u64;
 
         let shared: Shared = Arc::new((
             Mutex::new(SlabShared {
@@ -299,7 +399,7 @@ impl SlabFile {
             compressed,
             compressor,
             offsets_path,
-            pending_index: nr_existing_slabs, // Start from number of existing slabs
+            pending_index: nr_existing_slabs as u64, // Start from number of existing slabs
             shared,
             tx: Some(tx),
             tid: Some(tid),
@@ -323,8 +423,8 @@ impl SlabFile {
         let compressed = flags == 1;
         let compressor = None;
 
-        let offsets = SlabOffsets::read_offset_file(&offsets_path)?;
-        let nr_existing_slabs = offsets.offsets.len() as u64;
+        let offsets = SlabOffsets::open(&offsets_path, false)?;
+        let nr_existing_slabs = offsets.len() as u64;
         let file_size = data.metadata()?.len();
         let shared: Shared = Arc::new((
             Mutex::new(SlabShared {
@@ -377,17 +477,18 @@ impl SlabFile {
         if let Some(target) = target {
             let (lock, cv) = &*self.shared;
             let mut sh = lock.lock().unwrap();
-            // No borrow from `sh` while moving `sh`
             sh = cv
                 .wait_while(sh, |sh| sh.progress.last_written < target)
                 .unwrap();
 
             sh.data.sync_all()?;
-            sh.offsets.write_offset_file(&self.offsets_path)?;
+            sh.offsets.write_offset_file(true)?;
             drop(sh);
 
-            let f = OpenOptions::new().write(true).open(&self.offsets_path)?;
-            f.sync_all()?;
+            // Sync the directory that is holding the offsets file which also includes the data file
+            // Note: The offsets file could be re-built if needed.
+            let parent = self.offsets_path.parent().unwrap();
+            crate::recovery::sync_directory(parent)?;
         }
         Ok(())
     }
@@ -406,13 +507,13 @@ impl SlabFile {
         // Sync data and write offsets file atomically
         {
             let (lock, _) = &*self.shared;
-            let shared = lock.lock().unwrap();
+            let mut shared = lock.lock().unwrap();
 
             // Sync the data file to ensure all writes are persisted
             shared.data.sync_all()?;
 
             // Write offsets file while holding the lock
-            shared.offsets.write_offset_file(&self.offsets_path)?;
+            shared.offsets.write_offset_file(true)?;
         }
 
         Ok(())
@@ -425,15 +526,18 @@ impl SlabFile {
 
         // Check if slab index is within bounds
         let slab_idx = slab as usize;
-        if slab_idx >= shared.offsets.offsets.len() {
+        if slab_idx >= shared.offsets.len() {
             return Err(anyhow::anyhow!(
                 "Slab index {} out of bounds (have {} slabs committed to disk)",
                 slab,
-                shared.offsets.offsets.len()
+                shared.offsets.len()
             ));
         }
 
-        let offset = shared.offsets.offsets[slab_idx];
+        let offset = shared
+            .offsets
+            .get_slab_offset(slab_idx)
+            .ok_or_else(|| anyhow::anyhow!("Failed to get offset for slab {}", slab))?;
         shared.data.seek(SeekFrom::Start(offset))?;
 
         let magic = shared.data.read_u64::<LittleEndian>()?;
@@ -444,7 +548,13 @@ impl SlabFile {
         shared.data.read_exact(&mut expected_csum)?;
 
         let mut buf = vec![0; len as usize];
-        shared.data.read_exact(&mut buf)?;
+        let slab_read_result = shared.data.read_exact(&mut buf);
+        if let Err(e) = slab_read_result {
+            return Err(anyhow!(format!(
+                "While trying to read the slab {} with len {} we got error '{:#}'",
+                slab, len, e
+            )));
+        }
 
         let actual_csum = hash_64(&buf);
         assert_eq!(actual_csum, expected_csum);
@@ -524,7 +634,7 @@ impl SlabFile {
     pub fn get_nr_slabs(&self) -> usize {
         let (lock, _) = &*self.shared;
         let shared = lock.lock().unwrap();
-        shared.offsets.offsets.len()
+        shared.offsets.len()
     }
 
     pub fn get_file_size(&self) -> u64 {
@@ -542,13 +652,17 @@ impl SlabFile {
     }
 }
 
-impl SlabStorage for SlabFile {
+impl<'a> SlabStorage for SlabFile<'a> {
     fn write_slab(&mut self, data: &[u8]) -> Result<()> {
         self.write_slab(data)
     }
 
     fn read(&mut self, slab: u32) -> Result<Arc<Vec<u8>>> {
         self.read(slab)
+    }
+
+    fn sync_all(&mut self) -> Result<()> {
+        self.sync_all()
     }
 
     fn close(&mut self) -> Result<()> {

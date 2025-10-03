@@ -27,6 +27,10 @@ pub struct PackResponse {
 }
 
 impl BlkArchive {
+    pub fn archive_path(&self) -> &Path {
+        &self.archive
+    }
+
     pub fn new(archive: &Path) -> Result<Self> {
         Self::new_with(archive, 4096, true)
     }

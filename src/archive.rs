@@ -1,10 +1,12 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::cuckoo_filter::*;
 use crate::hash::*;
 use crate::hash_index::*;
 use crate::iovec::*;
 use crate::paths;
+use crate::paths::*;
+use crate::recovery::*;
 use crate::slab::MultiFile;
 use crate::slab::*;
 use std::io::Write;
@@ -13,12 +15,12 @@ use std::sync::{Arc, Mutex};
 
 pub const SLAB_SIZE_TARGET: usize = 4 * 1024 * 1024;
 
-pub struct Data<S: SlabStorage = MultiFile> {
+pub struct Data<'a, S: SlabStorage = MultiFile> {
     seen: CuckooFilter,
     hashes: lru::LruCache<u32, ByHash>,
 
     data_file: S,
-    hashes_file: Arc<Mutex<SlabFile>>,
+    hashes_file: Arc<Mutex<SlabFile<'a>>>,
 
     current_slab: u32,
     current_entries: usize,
@@ -28,6 +30,7 @@ pub struct Data<S: SlabStorage = MultiFile> {
     hashes_buf: Vec<u8>,
 
     slabs: lru::LruCache<u32, ByIndex>,
+    last_slab_completed: bool,
 }
 
 fn complete_slab_<S: SlabStorage>(slab: &mut S, buf: &mut Vec<u8>) -> Result<()> {
@@ -49,13 +52,52 @@ pub fn complete_slab<S: SlabStorage>(
     }
 }
 
-impl<S: SlabStorage> Data<S> {
+/// Build a cuckoo filter by scanning the hashes file.
+///
+/// - `hashes_slab` : mutable reference to hashes slab file
+/// - `capacity` : starting capacity to use when creating the filter.
+///
+/// Returns `seen`.
+fn build_cuckoo_from_hashes(
+    hashes_slab: &Arc<Mutex<SlabFile>>,
+    start_cap: usize,
+) -> Result<CuckooFilter> {
+    let mut capacity = start_cap;
+
+    loop {
+        let mut seen = CuckooFilter::with_capacity(capacity);
+        let mut resize_needed = false;
+
+        let mut hashes_file = hashes_slab.lock().unwrap();
+
+        for s in 0..hashes_file.get_nr_slabs() {
+            let buf = hashes_file.read(s as u32)?;
+            let hi = ByHash::new(buf)?;
+
+            for i in 0..hi.len() {
+                let h = hi.get(i);
+                let mini_hash = hash_le_u64(h);
+                if seen.test_and_set(mini_hash, s as u32).is_err() {
+                    // insertion failed -> need to grow capacity
+                    capacity *= 2;
+                    resize_needed = true;
+                    break;
+                }
+            }
+        }
+
+        if !resize_needed {
+            return Ok(seen);
+        }
+    }
+}
+
+impl<'a, S: SlabStorage> Data<'a, S> {
     pub fn new(
         data_file: S,
-        hashes_file: Arc<Mutex<SlabFile>>,
+        hashes_file: Arc<Mutex<SlabFile<'a>>>,
         slab_capacity: usize,
     ) -> Result<Self> {
-        let seen = CuckooFilter::read(paths::index_path())?;
         let hashes = lru::LruCache::new(NonZeroUsize::new(slab_capacity).unwrap());
         let nr_slabs = data_file.get_nr_slabs();
 
@@ -69,6 +111,15 @@ impl<S: SlabStorage> Data<S> {
 
         let slabs = lru::LruCache::new(NonZeroUsize::new(slab_capacity).unwrap());
 
+        // Read this last. If we get an error reading up the file, we
+        // can re-build it from the hashes file.
+        let seen = {
+            match CuckooFilter::read(paths::index_path()) {
+                Ok(c) => c,
+                Err(_) => build_cuckoo_from_hashes(&hashes_file, INITIAL_SIZE)?,
+            }
+        };
+
         Ok(Self {
             seen,
             hashes,
@@ -80,6 +131,7 @@ impl<S: SlabStorage> Data<S> {
             data_buf: Vec::new(),
             hashes_buf: Vec::new(),
             slabs,
+            last_slab_completed: false,
         })
     }
 
@@ -111,40 +163,13 @@ impl<S: SlabStorage> Data<S> {
         })
     }
 
-    fn rebuild_index(&mut self, mut new_capacity: usize) -> Result<()> {
-        loop {
-            let mut seen = CuckooFilter::with_capacity(new_capacity);
-            let mut resize_needed = false;
-
-            // Lock the hashes file and iterate through slabs.
-            let mut hashes_file = self.hashes_file.lock().unwrap();
-            for s in 0..hashes_file.get_nr_slabs() {
-                let buf = hashes_file.read(s as u32)?;
-                let hi = ByHash::new(buf)?;
-
-                for i in 0..hi.len() {
-                    let h = hi.get(i);
-                    let mini_hash = hash_le_u64(h);
-                    if seen.test_and_set(mini_hash, s as u32).is_err() {
-                        new_capacity *= 2;
-                        resize_needed = true;
-                        break;
-                    }
-                }
-
-                if resize_needed {
-                    break;
-                }
-            }
-
-            if !resize_needed {
-                std::mem::swap(&mut seen, &mut self.seen);
-                return Ok(());
-            }
-        }
+    fn rebuild_index(&mut self, new_capacity: usize) -> Result<()> {
+        let mut seen = build_cuckoo_from_hashes(&self.hashes_file, new_capacity)?;
+        std::mem::swap(&mut seen, &mut self.seen);
+        Ok(())
     }
 
-    fn complete_data_slab(&mut self) -> Result<()> {
+    fn complete_data_slab(&mut self) -> Result<bool> {
         if complete_slab(&mut self.data_file, &mut self.data_buf, 0)? {
             let mut builder = IndexBuilder::with_capacity(1024); // FIXME: estimate properly
             std::mem::swap(&mut builder, &mut self.current_index);
@@ -158,8 +183,10 @@ impl<S: SlabStorage> Data<S> {
             self.hashes_buf.clear();
             self.current_slab += 1;
             self.current_entries = 0;
+            Ok(true) // Slab was completed
+        } else {
+            Ok(false) // Slab not complete yet
         }
-        Ok(())
     }
 
     // Returns the (slab, entry) for the IoVec which may/may not already exist.
@@ -181,8 +208,10 @@ impl<S: SlabStorage> Data<S> {
                 self.seen.test_and_set(key, self.current_slab)
             })?;
 
-        if self.data_buf.len() as u64 + len > SLAB_SIZE_TARGET as u64 {
-            self.complete_data_slab()?;
+        if self.data_buf.len() as u64 + len > SLAB_SIZE_TARGET as u64
+            && self.complete_data_slab()?
+        {
+            self.last_slab_completed = true;
         }
 
         let r = (self.current_slab, self.current_entries as u32);
@@ -267,16 +296,53 @@ impl<S: SlabStorage> Data<S> {
         Ok((data, data_begin, data_end))
     }
 
-    // Not used at the moment, but was used for the send/receive POC.  This was being called after
-    // we received the newly created stream file for a pack operation.  The reason this is done is
-    // until you complete a slab, you cannot locate it in the data_get path for unpack operation.
+    // TODO: Now that we've fixed the issue preventing us from reading slab data that hasn't been written to
+    // a slab, do we need to keep this?
     pub fn flush(&mut self) -> Result<()> {
-        self.complete_data_slab()
+        self.complete_data_slab()?;
+        Ok(())
+    }
+
+    // Returns true if a slab was just completed, and resets the flag
+    pub fn slab_just_completed(&mut self) -> bool {
+        let result = self.last_slab_completed;
+        self.last_slab_completed = false;
+        result
+    }
+
+    // Get the total number of data slabs
+    pub fn get_nr_data_slabs(&self) -> u32 {
+        self.data_file.get_nr_slabs()
+    }
+
+    // Sync all archive files without closing them
+    pub fn sync_checkpoint(&mut self) -> Result<()> {
+        // Complete current data slab if needed
+        self.complete_data_slab()?;
+
+        // Sync hashes file
+        let mut hashes_file = self.hashes_file.lock().unwrap();
+        hashes_file.sync_all()?;
+        drop(hashes_file);
+
+        // Sync data file
+        self.data_file.sync_all()?;
+
+        // Write cuckoo filter
+        self.seen.write(paths::index_path())?;
+
+        // Sync the directory that is holding the cuckoo filter
+        // Note: The offsets file could be re-built if needed.
+        let index = paths::index_path();
+        let cuckoo_parent = index.parent().unwrap();
+        crate::recovery::sync_directory(cuckoo_parent)?;
+
+        Ok(())
     }
 
     fn sync_and_close(&mut self) {
-        self.complete_data_slab()
-            .expect("Data.drop: complete_data_slab error!");
+        self.sync_checkpoint()
+            .expect("Data.drop: sync_checkpoint error!");
         let mut hashes_file = self.hashes_file.lock().unwrap();
         hashes_file
             .close()
@@ -290,8 +356,148 @@ impl<S: SlabStorage> Data<S> {
     }
 }
 
-impl<S: SlabStorage> Drop for Data<S> {
+impl<'a, S: SlabStorage> Drop for Data<'a, S> {
     fn drop(&mut self) {
         self.sync_and_close();
     }
+}
+
+/// Performs a flight check on data and hashes slab files
+///
+/// Verifies that both files have the same number of slabs. If they don't match,
+/// regenerates the index files and checks again. Returns an error if they still
+/// don't match after regeneration.
+///
+/// # Arguments
+///
+/// * `archive_path`  Path to archive
+///
+/// # Returns
+///
+/// * `Ok(())` if files have matching slab counts
+/// * `Err` if slab counts don't match after regeneration
+pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
+    use std::path::Path;
+
+    // Make sure the archive directory actually exists
+    if !RecoveryCheckpoint::exists(&archive_path) {
+        return Err(anyhow!(format!(
+            "archive {:?} does not exist!",
+            archive_path.as_ref()
+        )));
+    }
+
+    let data_base_path = archive_path.as_ref().iter().as_path().join(data_path());
+    let data_file = current_active_data_slab(&data_base_path)?;
+
+    let hashes_file = archive_path.as_ref().iter().as_path().join(hashes_path());
+    let data_path = data_file.as_ref();
+    let hashes_path = hashes_file.as_ref();
+
+    // Helper to get offsets file path
+    fn offsets_path(p: &Path) -> std::path::PathBuf {
+        let mut offsets_path = std::path::PathBuf::new();
+        offsets_path.push(p);
+        offsets_path.set_extension("offsets");
+        offsets_path
+    }
+
+    // Helper to get slab offsets or regenerate if needed
+    fn get_or_regenerate_slab_offsets<'a>(
+        slab_path: &Path,
+        offsets_path: &Path,
+    ) -> Result<(crate::slab::offsets::SlabOffsets<'a>, bool)> {
+        let offsets = if offsets_path.exists() {
+            match crate::slab::offsets::SlabOffsets::open(offsets_path, false) {
+                Ok(offsets) => offsets,
+                Err(_) => {
+                    // Failed to read, regenerate
+                    crate::slab::regenerate_index(slab_path, None)?
+                }
+            }
+        } else {
+            // No offsets file, regenerate
+            crate::slab::regenerate_index(slab_path, None)?
+        };
+
+        Ok((offsets, false))
+    }
+
+    let data_offsets_path = offsets_path(data_path);
+    let hashes_offsets_path = offsets_path(hashes_path);
+
+    // Get initial slab counts
+    let (mut data_offsets, data_regen) =
+        get_or_regenerate_slab_offsets(data_path, &data_offsets_path)?;
+    let (mut hashes_offsets, hashes_regen) =
+        get_or_regenerate_slab_offsets(hashes_path, &hashes_offsets_path)?;
+
+    if data_regen {
+        data_offsets.write_offset_file(true)?;
+    }
+
+    if hashes_regen {
+        hashes_offsets.write_offset_file(true)?;
+    }
+
+    // Check if counts match bettween the data and hashes slab
+    if data_offsets.len() != hashes_offsets.len() {
+        // Close the offsets
+        drop(data_offsets);
+        drop(hashes_offsets);
+
+        // Try regenerating both to be sure, regenerating index files is safe.
+        let mut data_offsets = crate::slab::regenerate_index(data_path, None)?;
+        let mut hashes_offsets = crate::slab::regenerate_index(hashes_path, None)?;
+
+        let hashes_count = hashes_offsets.len();
+
+        data_offsets.write_offset_file(true)?;
+        hashes_offsets.write_offset_file(true)?;
+
+        // We need to compare the count of all slabs across all the data files to the hashes file
+        //
+        // TODO: We may also have to go back through the slab files fixing up the index files.
+        // because if the error exists in anyone of them, our numbers won't match
+        let base_path = archive_path
+            .as_ref()
+            .iter()
+            .as_path()
+            .join(paths::data_path());
+        let data_mf = MultiFile::open_for_read(base_path.clone(), 0)?;
+        let data_count = data_mf.get_nr_slabs();
+        drop(data_mf);
+
+        if data_count as usize != hashes_count {
+            // if we get here, we need to walk all the data slab files and regen all of the index
+            // files.  When that is done we will fetch the number of data slabs and if it doesn't
+            // match the hash slab count, the archive is in a bad state.
+            MultiFile::fix_data_file_slab_indexes(&base_path)?;
+
+            let data_mf = MultiFile::open_for_read(base_path.clone(), 0)?;
+            let data_count = data_mf.get_nr_slabs();
+
+            if data_count as usize != hashes_count {
+                return Err(anyhow::anyhow!(
+                "Slab count mismatch after offsets for all slab files regenerated: data file has {} slabs, hashes file has {} slabs",
+                data_count,
+                hashes_count
+            ));
+            }
+        }
+    }
+
+    // Lastly, remove any in-progress streams file
+
+    if let Err(e) = crate::paths::cleanup_temp_streams(
+        archive_path
+            .as_ref()
+            .to_path_buf()
+            .join("streams")
+            .as_path(),
+    ) {
+        eprintln!("Warning: Failed to cleanup temp directories: {}", e);
+    }
+
+    Ok(())
 }

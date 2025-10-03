@@ -887,15 +887,15 @@ fn unpack_instructions(buf: &[u8]) -> Result<Vec<MapInstruction>> {
 
 //-----------------------------------------
 
-pub struct StreamIter {
-    file: SlabFile,
+pub struct StreamIter<'a> {
+    file: SlabFile<'a>,
     slab: u32,
     entries: Vec<MapEntry>,
     index: usize,
 }
 
-impl StreamIter {
-    pub fn new(mut file: SlabFile) -> Result<Self> {
+impl<'a> StreamIter<'a> {
+    pub fn new(mut file: SlabFile<'a>) -> Result<Self> {
         let entries = Self::read_slab(&mut file, 0)?;
         Ok(Self {
             file,
@@ -924,7 +924,7 @@ impl StreamIter {
     }
 }
 
-impl Iterator for StreamIter {
+impl<'a> Iterator for StreamIter<'a> {
     type Item = Result<MapEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -980,7 +980,7 @@ struct Stats {
 }
 
 pub struct Dumper {
-    stream_file: SlabFile,
+    stream_file: SlabFile<'static>,
     vm_state: VMState,
     stats: Stats,
 }

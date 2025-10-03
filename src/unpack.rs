@@ -36,9 +36,9 @@ trait UnpackDest {
     fn complete(&mut self) -> Result<String>;
 }
 
-struct Unpacker<D: UnpackDest, S: SlabStorage = SlabFile> {
-    stream_file: SlabFile,
-    archive: archive::Data<S>,
+struct Unpacker<D: UnpackDest, S: SlabStorage = SlabFile<'static>> {
+    stream_file: SlabFile<'static>,
+    archive: archive::Data<'static, S>,
     dest: D,
 }
 
@@ -428,7 +428,8 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
             .open(output_file)
             .context("Couldn't open output")?
     };
-    env::set_current_dir(archive_dir)?;
+    env::set_current_dir(&archive_dir)?;
+
     let stream_cfg = config::read_stream_config(stream)?;
 
     report_output
