@@ -76,7 +76,7 @@ struct DedupStats {
     fill_size: u64,
 }
 
-struct DedupHandler<'a, S: SlabStorage = SlabFile<'static>> {
+struct DedupHandler<'a> {
     nr_chunks: usize,
 
     stream_file: SlabFile<'a>,
@@ -85,14 +85,14 @@ struct DedupHandler<'a, S: SlabStorage = SlabFile<'static>> {
     mapping_builder: Arc<Mutex<dyn Builder>>,
 
     stats: DedupStats,
-    archive: Data<'a, S>,
+    archive: Data<'a, MultiFile>,
 }
 
-impl<'a, S: SlabStorage> DedupHandler<'a, S> {
+impl<'a> DedupHandler<'a> {
     fn new(
         stream_file: SlabFile<'a>,
         mapping_builder: Arc<Mutex<dyn Builder>>,
-        archive: Data<'a, S>,
+        archive: Data<'a, MultiFile>,
     ) -> Result<Self> {
         let stats = DedupStats::default();
 
@@ -141,7 +141,7 @@ impl<'a, S: SlabStorage> DedupHandler<'a, S> {
     }
 }
 
-impl<'a, S: SlabStorage> IoVecHandler for DedupHandler<'a, S> {
+impl<'a> IoVecHandler for DedupHandler<'a> {
     fn handle_data(&mut self, iov: &IoVec) -> Result<()> {
         self.nr_chunks += 1;
         let len = iov_len_(iov);
@@ -162,7 +162,8 @@ impl<'a, S: SlabStorage> IoVecHandler for DedupHandler<'a, S> {
             let h = hash_256_iov(iov);
             // Note: add_data_entry returns existing entry if present, else returns newly inserted
             // entry.
-            let (entry_location, data_written) = self.archive.data_add(h, iov, len)?;
+            let (entry_location, data_written) =
+                self.archive.data_add_with_boundary_check(h, iov, len)?;
             let me = MapEntry::Data {
                 slab: entry_location.0,
                 offset: entry_location.1,
@@ -305,11 +306,8 @@ impl Packer {
     fn pack(mut self, hashes_file: Arc<Mutex<SlabFile<'static>>>) -> Result<()> {
         let mut splitter = ContentSensitiveSplitter::new(self.block_size as u32);
 
-        let hashes_per_slab = std::cmp::max(SLAB_SIZE_TARGET / self.block_size, 1);
-        let slab_capacity = ((self.hash_cache_size_meg * 1024 * 1024)
-            / std::mem::size_of::<Hash256>())
-            / hashes_per_slab;
-
+        let slab_capacity =
+            crate::archive::calculate_slab_capacity(self.block_size, self.hash_cache_size_meg);
         let data_file = MultiFile::open_for_write(data_path(), 128, slab_capacity)?;
 
         let (stream_id, temp_stream_dir, final_stream_dir) = new_stream_path()?;

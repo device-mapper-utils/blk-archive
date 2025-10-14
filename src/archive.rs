@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::cuckoo_filter::*;
 use crate::hash::*;
@@ -318,21 +318,54 @@ impl<'a, S: SlabStorage> Data<'a, S> {
     // Sync all archive files without closing them
     pub fn sync_checkpoint(&mut self) -> Result<()> {
         // Complete current data slab if needed
-        self.complete_data_slab()?;
+        self.complete_data_slab()
+            .with_context(|| "Failed to complete data slab during sync checkpoint")?;
 
         // Sync hashes file
         let mut hashes_file = self.hashes_file.lock().unwrap();
-        hashes_file.sync_all()?;
+        hashes_file
+            .sync_all()
+            .with_context(|| "Failed to sync hashes file")?;
         drop(hashes_file);
 
         // Sync data file
-        self.data_file.sync_all()?;
+        self.data_file
+            .sync_all()
+            .with_context(|| "Failed to sync data file")?;
 
         // Write cuckoo filter
         self.seen.write(paths::index_path())?;
 
         // Sync the directory that is holding the cuckoo filter
         // Note: The offsets file could be re-built if needed.
+        let index = paths::index_path();
+        let cuckoo_parent = index.parent().unwrap();
+        crate::recovery::sync_directory(cuckoo_parent)
+            .with_context(|| "Failed to sync cuckoo filter directory")?;
+
+        Ok(())
+    }
+
+    /// Sync archive state for file boundary crossing
+    ///
+    /// This is called when MultiFile is about to create a new slab file.
+    /// Unlike sync_checkpoint(), this does NOT complete the current data slab
+    /// or sync the data file, since we're in the middle of a write_slab() operation.
+    pub fn sync_for_file_boundary(&mut self) -> Result<()> {
+        // Sync hashes file before creating checkpoint
+        // Note: While MultiFile::write_slab syncs the data file when writing the last slab,
+        // it does NOT sync the hashes file, which is a separate SlabFile. We must sync it
+        // here to ensure the checkpoint captures the correct file size.
+        let mut hashes_file = self.hashes_file.lock().unwrap();
+        hashes_file
+            .sync_all()
+            .with_context(|| "Failed to sync hashes file before boundary crossing")?;
+        drop(hashes_file);
+
+        // Write cuckoo filter
+        self.seen.write(paths::index_path())?;
+
+        // Sync the directory holding the cuckoo filter
         let index = paths::index_path();
         let cuckoo_parent = index.parent().unwrap();
         crate::recovery::sync_directory(cuckoo_parent)?;
@@ -362,6 +395,104 @@ impl<'a, S: SlabStorage> Drop for Data<'a, S> {
     }
 }
 
+pub fn calculate_slab_capacity(block_size: usize, hash_cache_size_meg: usize) -> usize {
+    let hashes_per_slab = std::cmp::max(SLAB_SIZE_TARGET / block_size, 1);
+    ((hash_cache_size_meg * 1024 * 1024) / std::mem::size_of::<Hash256>()) / hashes_per_slab
+}
+
+// Specialized methods for Data<MultiFile>
+impl<'a> Data<'a, MultiFile> {
+    /// Check if the next slab write will cross a file boundary
+    pub fn will_cross_file_boundary(&self) -> bool {
+        self.data_file.will_cross_boundary_on_next_write()
+    }
+
+    /// Handle file boundary crossing with proper checkpointing
+    ///
+    /// This method:
+    /// 1. Syncs all archive state (hashes, cuckoo filter, directories)
+    /// 2. Creates a checkpoint with the current file ID
+    /// 3. Crosses the file boundary (closes old file, creates new one)
+    ///
+    /// CRITICAL: This ensures crash consistency by checkpointing BEFORE
+    /// creating the new file. If we crash after the new file is created
+    /// but before the next checkpoint, recovery will delete the new file.
+    pub fn handle_file_boundary_crossing(&mut self) -> Result<()> {
+        if !self.will_cross_file_boundary() {
+            return Err(anyhow::anyhow!(
+                "handle_file_boundary_crossing called when not at boundary"
+            ));
+        }
+
+        let current_file_id = self.data_file.get_current_write_file_id();
+
+        // Sync archive state (hashes, cuckoo filter, directories)
+        self.sync_for_file_boundary()?;
+
+        // Create checkpoint with current file_id BEFORE crossing boundary
+        let cwd = std::env::current_dir()?;
+        let checkpoint_path = cwd.join(crate::recovery::check_point_file());
+        let checkpoint = crate::recovery::create_checkpoint_from_files(&cwd, current_file_id)?;
+        checkpoint.write(checkpoint_path)?;
+
+        // Now it's safe to cross the boundary
+        self.data_file.cross_file_boundary()?;
+
+        Ok(())
+    }
+
+    /// Complete data slab with file boundary handling
+    ///
+    /// This wraps the generic complete_data_slab() to handle MultiFile-specific
+    /// file boundary crossings with proper checkpointing.
+    pub fn complete_data_slab_with_boundary_check(&mut self) -> Result<bool> {
+        // Check if we're at a file boundary BEFORE completing the slab
+        if self.will_cross_file_boundary() {
+            self.handle_file_boundary_crossing()?;
+        }
+
+        // Now safe to complete the slab
+        self.complete_data_slab()
+    }
+
+    /// Data add with file boundary handling
+    ///
+    /// This wraps the generic data_add() to handle MultiFile-specific
+    /// file boundary crossings. When data_add() encounters a file boundary
+    /// (MultiFile returns FileBoundaryError from write_slab()), this method:
+    ///
+    /// 1. Detects the FileBoundaryError via downcast
+    /// 2. Syncs archive state and creates a checkpoint
+    /// 3. Crosses the file boundary (close old file, create new one)
+    /// 4. Retries the data_add() operation
+    ///
+    /// This ensures crash consistency by checkpointing BEFORE creating new files.
+    pub fn data_add_with_boundary_check(
+        &mut self,
+        h: Hash256,
+        iov: &IoVec,
+        len: u64,
+    ) -> Result<((u32, u32), u64)> {
+        // The generic data_add() may call complete_data_slab() which writes a slab
+        // If we hit a file boundary, handle it and retry
+        match self.data_add(h, iov, len) {
+            Err(e) => {
+                // Use downcast to check for the specific FileBoundaryError type
+                if let Some(_boundary_err) = e.downcast_ref::<crate::slab::FileBoundaryError>() {
+                    // Hit file boundary during data_add
+                    // Sync, checkpoint, cross boundary, then retry
+                    self.handle_file_boundary_crossing()?;
+                    self.data_add(h, iov, len)
+                } else {
+                    // Some other error, propagate it
+                    Err(e)
+                }
+            }
+            result => result,
+        }
+    }
+}
+
 /// Performs a flight check on data and hashes slab files
 ///
 /// Verifies that both files have the same number of slabs. If they don't match,
@@ -385,6 +516,13 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
             "archive {:?} does not exist!",
             archive_path.as_ref()
         )));
+    }
+
+    let checkpoint_path = std::path::Path::new(archive_path.as_ref().to_path_buf().as_path())
+        .join(crate::recovery::check_point_file());
+    if RecoveryCheckpoint::exists(&checkpoint_path) {
+        let checkpoint = RecoveryCheckpoint::read(&checkpoint_path)?;
+        checkpoint.apply(&archive_path)?;
     }
 
     let data_base_path = archive_path.as_ref().iter().as_path().join(data_path());
@@ -500,4 +638,231 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
     }
 
     Ok(())
+}
+
+// The tests below verify the crash-consistency guarantees of the file boundary
+// crossing implementation.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::create::default;
+    use crate::recovery;
+    use crate::slab::multi_file::{MultiFile, SLABS_PER_FILE};
+    use crate::slab::SlabFileBuilder;
+    use rand::Rng;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    fn fill_random(vec: &mut Vec<u8>) {
+        let mut rng = rand::thread_rng();
+        for byte in vec.iter_mut() {
+            *byte = rng.gen();
+        }
+    }
+
+    /// Test that file boundary crossing creates checkpoints correctly
+    ///
+    /// This test verifies the critical crash-consistency guarantee:
+    /// - Checkpoint is created BEFORE new file is created
+    /// - If interrupted after checkpoint, new file can be created on recovery
+    /// - If interrupted before checkpoint, state rolls back to previous file
+    #[test]
+    fn test_file_boundary_checkpoint_on_interruption() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let archive_path = temp_dir.path();
+
+        std::fs::create_dir_all(archive_path)
+            .with_context(|| format!("Unable to create archive {:?}", archive_path))?;
+
+        // This will create an empty archive with defaults
+        let values = default(archive_path).with_context(|| {
+            format!(
+                "Error while creating default directory in {:?}",
+                archive_path
+            )
+        })?;
+        let slab_capacity = calculate_slab_capacity(values.block_size, values.hash_cache_size_meg);
+
+        let data_file = MultiFile::open_for_write(data_path(), 10, slab_capacity)?;
+        let hashes_file = Arc::new(Mutex::new(
+            SlabFileBuilder::open(hashes_path())
+                .write(true)
+                .queue_depth(16)
+                .build()
+                .context("couldn't open hashes slab file")?,
+        ));
+
+        let mut archive = Data::new(data_file, hashes_file.clone(), 10)?;
+
+        // Check initial state - should not be at boundary with empty archive
+        assert!(
+            !archive.will_cross_file_boundary(),
+            "Empty archive should not be at boundary"
+        );
+
+        println!("Writing {} slabs to reach file boundary...", SLABS_PER_FILE);
+
+        // Write SLABS_PER_FILE slabs to reach the boundary
+        // Each slab needs to exceed SLAB_SIZE_TARGET to trigger completion
+        // and the data needs to be random to prevent it from being de-duplicated
+        let block_size = 4096;
+        let blocks_per_slab = (SLAB_SIZE_TARGET / block_size) + 1;
+        let mut test_data = vec![0u8; block_size];
+
+        for slab_idx in 0..SLABS_PER_FILE {
+            for _ in 0..blocks_per_slab {
+                // We need to data random so it doesn't get de-duped
+                fill_random(&mut test_data);
+                let mut iov = IoVec::new();
+                iov.push(&test_data);
+                let h = crate::hash::hash_256(&test_data);
+                archive.data_add_with_boundary_check(h, &iov, test_data.len() as u64)?;
+            }
+
+            if slab_idx % 100 == 0 {
+                println!("Written {} slabs...", slab_idx + 1);
+            }
+        }
+
+        // Now we should be at the boundary
+        assert!(
+            archive.will_cross_file_boundary(),
+            "After writing {} slabs, should be at file boundary",
+            SLABS_PER_FILE
+        );
+
+        // Test boundary crossing with checkpoint
+        archive.handle_file_boundary_crossing()?;
+
+        // After crossing, should not be at boundary anymore
+        assert!(
+            !archive.will_cross_file_boundary(),
+            "After crossing boundary, should not be at boundary"
+        );
+
+        // Verify checkpoint was created with file_id=0 (before crossing to file 1)
+        let checkpoint_path = archive_path.join(recovery::check_point_file());
+        assert!(checkpoint_path.exists(), "Checkpoint file should exist");
+
+        let checkpoint = recovery::RecoveryCheckpoint::read(&checkpoint_path)?;
+        assert_eq!(
+            checkpoint.data_slab_file_id, 0,
+            "Checkpoint should have file_id=0 (created before crossing to file 1)"
+        );
+
+        // Check for the existence of the new data file and index
+        let new_file_path = file_id_to_path(archive_path.join(paths::data_path()).as_path(), 1);
+
+        assert!(
+            new_file_path.exists(),
+            "New data file should exist after crossing file boundary!"
+        );
+
+        drop(archive);
+
+        // Check the archive, fix up as needed, this should remove the new data file and index
+        flight_check(archive_path).unwrap();
+
+        // Check that the new data file and index are gone
+        assert!(
+            !new_file_path.exists(),
+            "New data file should NOT exist after flight_check()"
+        );
+
+        Ok(())
+    }
+
+    /// Test that interruption BEFORE checkpoint at boundary loses uncommitted data
+    ///
+    /// This test verifies that if we crash BEFORE the checkpoint is created,
+    /// the new file gets deleted during recovery.
+    #[test]
+    fn test_file_boundary_interruption_before_checkpoint() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let archive_path = temp_dir.path();
+
+        std::fs::create_dir_all(archive_path)
+            .with_context(|| format!("Unable to create archive {:?}", archive_path))?;
+
+        // Create data and hashes files
+        // This will create an empty archive with defaults
+        let values = default(archive_path).with_context(|| {
+            format!(
+                "Error while trying to create a 'default' archive in {:?}",
+                archive_path
+            )
+        })?;
+        let slab_capacity = calculate_slab_capacity(values.block_size, values.hash_cache_size_meg);
+
+        let data_file = MultiFile::open_for_write(data_path(), 10, slab_capacity)?;
+        let hashes_file = Arc::new(Mutex::new(
+            SlabFileBuilder::open(hashes_path())
+                .write(true)
+                .queue_depth(16)
+                .build()
+                .context("couldn't open hashes slab file")?,
+        ));
+
+        let archive = Data::new(data_file, hashes_file.clone(), 10)?;
+
+        // Create a checkpoint pointing to file 0 only
+        let checkpoint_path = archive_path.join(recovery::check_point_file());
+        let checkpoint = recovery::create_checkpoint_from_files(archive_path, 0)?;
+        checkpoint.write(&checkpoint_path)?;
+
+        // Now manually create file 1 without checkpointing (simulating crash during boundary cross)
+        // This simulates the scenario where:
+        // 1. handle_file_boundary_crossing starts
+        // 2. New file gets created
+        // 3. CRASH occurs before checkpoint is written
+
+        let file1_path = file_id_to_path(archive_path.join(paths::data_path()).as_path(), 1);
+        std::fs::write(&file1_path, b"corrupt data that should be deleted")?;
+        let mut file1_offsets = file1_path.clone();
+        file1_offsets.set_extension("offsets");
+
+        std::fs::write(file1_offsets.clone(), b"index")?;
+
+        // Drop archive without syncing
+        std::mem::forget(archive);
+        std::mem::forget(hashes_file);
+
+        // Apply recovery - this should DELETE file 1 as it's not in the checkpoint
+        let checkpoint_for_recovery = recovery::RecoveryCheckpoint::read(&checkpoint_path)?;
+        checkpoint_for_recovery.apply(archive_path)?;
+
+        // Verify file 1 data file was deleted (recovery removes .data and .offsets files
+        assert!(
+            !file1_path.exists(),
+            "File 1 {:?} should have been deleted during recovery (not in checkpoint)",
+            file1_path
+        );
+
+        // Verify offsets file was also deleted
+        assert!(
+            !file1_offsets.exists(),
+            "File 1 offsets {:?} should have been deleted during recovery (not in checkpoint)",
+            file1_offsets
+        );
+
+        // Verify file 0 still exists
+        let file0_path = file_id_to_path(archive_path.join(paths::data_path()).as_path(), 0);
+        let mut file0_index_path = file0_path.clone();
+        file0_index_path.set_extension("offsets");
+
+        assert!(
+            file0_path.exists(),
+            "File 0 should still exist {:?}",
+            file0_path
+        );
+
+        // Verify offsets file was also deleted
+        assert!(
+            file0_index_path.exists(),
+            "File 0 index should still exist {:?}",
+            file0_path
+        );
+
+        Ok(())
+    }
 }

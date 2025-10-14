@@ -212,8 +212,8 @@ impl RecoveryCheckpoint {
             crate::slab::multi_file::file_id_to_path(&data_path, self.data_slab_file_id);
         Self::truncate_file(&current_file_path, self.data_slab_file_size)?;
 
-        // Note: Older files (file_id < data_slab_file_id) are fully written and don't need truncation
-
+        // Note: Older files (file_id < data_slab_file_id) are fully written and don't
+        // need truncation (well, that is our expectation :-)
         // Remove any files with ID > data_slab_file_id (created after checkpoint)
         let mut file_id = self.data_slab_file_id + 1;
         loop {
@@ -227,6 +227,12 @@ impl RecoveryCheckpoint {
                 if offsets_path.exists() {
                     std::fs::remove_file(&offsets_path)?;
                 }
+
+                let p = file_path.parent().with_context(|| {
+                    format!("We expected parent to exist for child {:?}", file_path)
+                })?;
+                crate::recovery::sync_directory(p)
+                    .with_context(|| format!("Error during directory sync of {:?}", p))?;
 
                 file_id += 1;
             } else {

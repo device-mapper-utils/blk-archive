@@ -155,7 +155,7 @@ pub fn regenerate_index<'a, P: AsRef<Path>>(
         .read(true)
         .write(false)
         .create(false)
-        .open(data_path)?;
+        .open(slab_name.clone())?;
 
     let file_size = match check_len {
         Some(len) => len,
@@ -188,7 +188,8 @@ pub fn regenerate_index<'a, P: AsRef<Path>>(
         if remaining < SLAB_HDR_LEN {
             return Err(anyhow!(
                 "Slab {slab_index} is incomplete, not enough remaining for header, \
-                {remaining} remaining bytes."
+                {remaining} remaining bytes for data path = {:?}",
+                slab_name
             ));
         }
 

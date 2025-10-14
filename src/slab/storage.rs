@@ -85,6 +85,48 @@ mod tests {
         throughput
     }
 
+    /// Helper function to measure MultiFile write performance with boundary handling
+    fn measure_multifile_write_performance(
+        name: &str,
+        base_path: &std::path::Path,
+        num_slabs: u32,
+    ) -> f64 {
+        use crate::slab::multi_file::SLABS_PER_FILE;
+
+        let mut storage =
+            MultiFile::create(base_path, PERF_QUEUE_DEPTH, false, PERF_CACHE_ENTRIES).unwrap();
+        let data = vec![42u8; SLAB_SIZE_TARGET];
+        let start = Instant::now();
+
+        for _ in 0..num_slabs {
+            // Check if we're at a boundary and need to cross
+            if storage.will_cross_boundary_on_next_write() {
+                // For testing, we just cross the boundary without checkpointing
+                // In production, handle_file_boundary_crossing() would sync and checkpoint
+                storage.cross_file_boundary().unwrap();
+            }
+            storage.write_slab(&data).unwrap();
+        }
+
+        storage.close().unwrap();
+        let duration = start.elapsed();
+        let throughput = (num_slabs as f64 * SLAB_SIZE_TARGET as f64)
+            / (1024.0 * 1024.0)
+            / duration.as_secs_f64();
+
+        println!("{} write performance:", name);
+        println!("  Slabs: {}", num_slabs);
+        println!("  Duration: {:?}", duration);
+        println!("  Throughput: {:.2} MB/s", throughput);
+        println!(
+            "  Files created: {}",
+            (num_slabs + SLABS_PER_FILE - 1) / SLABS_PER_FILE
+        );
+
+        assert_eq!(storage.get_nr_slabs() as u32, num_slabs);
+        throughput
+    }
+
     /// Helper function to measure read performance
     fn measure_read_performance<F, S>(name: &str, create_storage: F, num_slabs: u32) -> f64
     where
@@ -136,20 +178,8 @@ mod tests {
 
         // Test MultiFile
         let multifile_path = temp_dir.path().join("multifile");
-        let multifile_path_clone = multifile_path.clone();
-        let multifile_throughput = measure_write_performance(
-            "MultiFile",
-            move || {
-                MultiFile::create(
-                    &multifile_path_clone,
-                    PERF_QUEUE_DEPTH,
-                    false,
-                    PERF_CACHE_ENTRIES,
-                )
-                .unwrap()
-            },
-            PERF_NUM_SLABS,
-        );
+        let multifile_throughput =
+            measure_multifile_write_performance("MultiFile", &multifile_path, PERF_NUM_SLABS);
 
         // Compare performance
         println!("\nWrite Performance Comparison:");
@@ -469,18 +499,9 @@ mod tests {
 
         // Test MultiFile (crosses boundary)
         let multifile_path = temp_dir.path().join("multifile_boundary");
-        let multifile_path_clone = multifile_path.clone();
-        let multifile_write_throughput = measure_write_performance(
+        let multifile_write_throughput = measure_multifile_write_performance(
             "MultiFile (boundary crossing)",
-            move || {
-                MultiFile::create(
-                    &multifile_path_clone,
-                    PERF_QUEUE_DEPTH,
-                    false,
-                    PERF_CACHE_ENTRIES,
-                )
-                .unwrap()
-            },
+            &multifile_path,
             PERF_NUM_SLABS_BOUNDARY,
         );
 

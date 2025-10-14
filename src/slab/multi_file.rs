@@ -6,6 +6,28 @@ use crate::archive::SLAB_SIZE_TARGET;
 use crate::slab::file::*;
 use crate::slab::storage::*;
 
+/// Error returned when attempting to write a slab at a file boundary
+///
+/// This is a recoverable error that signals the caller to checkpoint
+/// and then call cross_file_boundary() before retrying the write.
+#[derive(Debug, Clone)]
+pub struct FileBoundaryError {
+    pub current_file_id: u32,
+    pub next_file_id: u32,
+}
+
+impl std::fmt::Display for FileBoundaryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "File boundary reached at file {} (next file will be {}). Caller must checkpoint and call cross_file_boundary().",
+            self.current_file_id, self.next_file_id
+        )
+    }
+}
+
+impl std::error::Error for FileBoundaryError {}
+
 //------------------------------------------------
 // Multi-file configuration constants
 
@@ -278,30 +300,68 @@ impl MultiFile {
         })
     }
 
+    fn will_cross(current: u32) -> bool {
+        current >= SLABS_PER_FILE
+    }
+
+    /// Returns true if the next write_slab() will trigger a file boundary crossing
+    pub fn will_cross_boundary_on_next_write(&self) -> bool {
+        MultiFile::will_cross(self.write_file_slab_count)
+    }
+
+    /// Get the current write file ID
+    pub fn get_current_write_file_id(&self) -> u32 {
+        self.write_file_id
+    }
+
+    /// Perform file boundary crossing: close current file and create next one
+    ///
+    /// IMPORTANT: Caller MUST sync all archive state and create a checkpoint
+    /// BEFORE calling this method to ensure crash consistency.
+    ///
+    /// This method should only be called when will_cross_boundary_on_next_write() returns true.
+    pub fn cross_file_boundary(&mut self) -> Result<()> {
+        if self.write_file_slab_count < SLABS_PER_FILE {
+            return Err(anyhow::anyhow!(
+                "cross_file_boundary called when not at boundary (count={}, limit={})",
+                self.write_file_slab_count,
+                SLABS_PER_FILE
+            ));
+        }
+
+        // Close current file
+        if let Some(mut file) = self.write_file.take() {
+            file.close()?;
+        }
+
+        // Move to next file
+        self.write_file_id += 1;
+        self.write_file_slab_count = 0;
+
+        // Create new file
+        let new_file_path = file_id_to_path(&self.base_path, self.write_file_id);
+        if let Some(parent) = new_file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        self.write_file = Some(SlabFile::create(
+            new_file_path,
+            self.queue_depth,
+            self.compressed,
+            self.cache_nr_entries,
+        )?);
+
+        Ok(())
+    }
+
     pub fn write_slab(&mut self, data: &[u8]) -> Result<()> {
-        // Check if current file is full
-        if self.write_file_slab_count >= SLABS_PER_FILE {
-            // Close current file
-            if let Some(mut file) = self.write_file.take() {
-                file.close()?;
+        // Boundary crossing must be handled explicitly by caller
+        if self.will_cross_boundary_on_next_write() {
+            return Err(FileBoundaryError {
+                current_file_id: self.write_file_id,
+                next_file_id: self.write_file_id + 1,
             }
-
-            // Move to next file
-            self.write_file_id += 1;
-            self.write_file_slab_count = 0;
-
-            // Create new file
-            let new_file_path = file_id_to_path(&self.base_path, self.write_file_id);
-            if let Some(parent) = new_file_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-
-            self.write_file = Some(SlabFile::create(
-                new_file_path,
-                self.queue_depth,
-                self.compressed,
-                self.cache_nr_entries,
-            )?);
+            .into());
         }
 
         // Write to current file
@@ -309,6 +369,11 @@ impl MultiFile {
             file.write_slab(data)?;
             self.write_file_slab_count += 1;
             self.total_slabs += 1;
+
+            // If this is the last slab in this file, sync it!
+            if MultiFile::will_cross(self.write_file_slab_count) {
+                file.sync_all()?;
+            }
         }
 
         Ok(())
@@ -675,6 +740,10 @@ mod tests {
 
         // Write slabs that will span two files
         for i in 0..total_slabs {
+            // Check if we need to cross file boundary
+            if mf.will_cross_boundary_on_next_write() {
+                mf.cross_file_boundary().unwrap();
+            }
             let data = vec![(i % 256) as u8; SLAB_SIZE_TARGET];
             mf.write_slab(&data).unwrap();
         }

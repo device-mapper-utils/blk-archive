@@ -86,20 +86,15 @@ fn numeric_option<T: std::str::FromStr>(matches: &ArgMatches, name: &str, dflt: 
 }
 */
 
-pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
-    let dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap());
-    let data_compression = matches.get_one::<String>("DATA_COMPRESSION").unwrap() == "y";
+fn create(
+    dir: &Path,
+    data_compression: bool,
+    block_size: usize,
+    hash_cache_size_meg: usize,
+    data_cache_size_meg: usize,
+) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("Unable to create archive {:?}", dir))?;
 
-    let mut block_size = numeric_option::<usize>(matches, "BLOCK_SIZE", 4096)?;
-    let new_block_size = adjust_block_size(block_size);
-    if new_block_size != block_size {
-        report.info(&format!("adjusting block size to {new_block_size}"));
-        block_size = new_block_size;
-    }
-    let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
-    let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
-
-    fs::create_dir(dir).with_context(|| format!("Unable to create archive {:?}", dir))?;
     write_config(dir, block_size, hash_cache_size_meg, data_cache_size_meg)?;
     create_sub_dir(dir, "data")?;
     create_sub_dir(dir, "streams")?;
@@ -131,6 +126,45 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
     checkpoint.write(checkpoint_path)?;
 
     Ok(())
+}
+
+pub struct CreateParmeters {
+    pub data_compression: bool,
+    pub block_size: usize,
+    pub hash_cache_size_meg: usize,
+    pub data_cache_size_meg: usize,
+}
+
+pub fn default(dir: &Path) -> Result<CreateParmeters> {
+    create(dir, true, 4096, 1024, 1024)?;
+    Ok(CreateParmeters {
+        data_compression: true,
+        block_size: 4096,
+        hash_cache_size_meg: 1024,
+        data_cache_size_meg: 1024,
+    })
+}
+
+pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
+    let dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap());
+    let data_compression = matches.get_one::<String>("DATA_COMPRESSION").unwrap() == "y";
+
+    let mut block_size = numeric_option::<usize>(matches, "BLOCK_SIZE", 4096)?;
+    let new_block_size = adjust_block_size(block_size);
+    if new_block_size != block_size {
+        report.info(&format!("adjusting block size to {}", new_block_size));
+        block_size = new_block_size;
+    }
+    let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
+    let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
+
+    create(
+        dir,
+        data_compression,
+        block_size,
+        hash_cache_size_meg,
+        data_cache_size_meg,
+    )
 }
 
 //-----------------------------------------
