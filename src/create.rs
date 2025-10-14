@@ -10,6 +10,7 @@ use thinp::report::*;
 use crate::cuckoo_filter::*;
 use crate::paths;
 use crate::paths::*;
+use crate::recovery;
 use crate::slab::{builder::*, MultiFile};
 use crate::{config::*, cuckoo_filter};
 
@@ -87,26 +88,30 @@ fn numeric_option<T: std::str::FromStr>(matches: &ArgMatches, name: &str, dflt: 
 */
 
 fn create(
-    dir: &Path,
+    archive_dir: &Path,
     data_compression: bool,
     block_size: usize,
     hash_cache_size_meg: usize,
     data_cache_size_meg: usize,
 ) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("Unable to create archive {:?}", dir))?;
+    fs::create_dir_all(archive_dir)
+        .with_context(|| format!("Unable to create archive {:?}", archive_dir))?;
 
-    write_config(dir, block_size, hash_cache_size_meg, data_cache_size_meg)?;
-    create_sub_dir(dir, "data")?;
-    create_sub_dir(dir, "streams")?;
-    create_sub_dir(dir, "indexes")?;
-
-    std::env::set_current_dir(dir)?;
+    write_config(
+        archive_dir,
+        block_size,
+        hash_cache_size_meg,
+        data_cache_size_meg,
+    )?;
+    create_sub_dir(archive_dir, "data")?;
+    create_sub_dir(archive_dir, "streams")?;
+    create_sub_dir(archive_dir, "indexes")?;
 
     // Create empty data and hash slab files
-    let mut data_file = MultiFile::create(data_path(), 1, data_compression, 1)?;
+    let mut data_file = MultiFile::create(archive_dir, 1, data_compression, 1)?;
     data_file.close()?;
 
-    let mut hashes_file = SlabFileBuilder::create(hashes_path())
+    let mut hashes_file = SlabFileBuilder::create(hashes_path(archive_dir))
         .queue_depth(1)
         .compressed(false)
         .build()?;
@@ -114,15 +119,14 @@ fn create(
 
     // Write empty index
     let index = CuckooFilter::with_capacity(cuckoo_filter::INITIAL_SIZE);
-    index.write(paths::index_path())?;
+    index.write(paths::index_path(archive_dir))?;
 
     // Sync all files to disk before creating checkpoint
-    let cwd = std::env::current_dir()?;
-    crate::recovery::sync_archive(&cwd, 0)?;
+    recovery::sync_archive(archive_dir, 0)?;
 
     // Create initial recovery checkpoint
-    let checkpoint_path = cwd.join(crate::recovery::check_point_file());
-    let checkpoint = crate::recovery::create_checkpoint_from_files(&cwd, 0)?;
+    let checkpoint_path = archive_dir.join(recovery::check_point_file());
+    let checkpoint = recovery::create_checkpoint_from_files(archive_dir, 0)?;
     checkpoint.write(checkpoint_path)?;
 
     Ok(())
@@ -146,7 +150,7 @@ pub fn default(dir: &Path) -> Result<CreateParmeters> {
 }
 
 pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
-    let dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap());
+    let archive_dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap());
     let data_compression = matches.get_one::<String>("DATA_COMPRESSION").unwrap() == "y";
 
     let mut block_size = numeric_option::<usize>(matches, "BLOCK_SIZE", 4096)?;
@@ -159,7 +163,7 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
     let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
 
     create(
-        dir,
+        archive_dir,
         data_compression,
         block_size,
         hash_cache_size_meg,

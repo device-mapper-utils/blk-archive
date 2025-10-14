@@ -7,10 +7,10 @@ use serde_json::to_string_pretty;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::output::Output;
+use crate::paths::*;
 use crate::slab::builder::*;
 use crate::slab::*;
 use crate::stack::*;
@@ -986,9 +986,8 @@ pub struct Dumper {
 }
 
 impl Dumper {
-    // Assumes current directory is the root of the archive.
-    pub fn new(stream: &str) -> Result<Self> {
-        let stream_path: PathBuf = ["streams", stream, "stream"].iter().collect();
+    pub fn new(archive_dir: &std::path::Path, stream: &str) -> Result<Self> {
+        let stream_path = stream_path(archive_dir, stream);
         let stream_file = SlabFileBuilder::open(stream_path).build()?;
 
         Ok(Self {

@@ -4,24 +4,35 @@ use std::path::{Path, PathBuf};
 
 //------------------------------
 
-pub fn index_path() -> PathBuf {
-    ["indexes", "seen"].iter().collect()
+fn make<P, I, S>(base: P, parts: I) -> PathBuf
+where
+    P: AsRef<Path>,
+    I: IntoIterator<Item = S>,
+    S: AsRef<Path>,
+{
+    parts
+        .into_iter()
+        .fold(base.as_ref().to_path_buf(), |p, s| p.join(s))
 }
 
-pub fn data_path() -> PathBuf {
-    ["data", "data"].iter().collect()
+pub fn index_path<P: AsRef<std::path::Path>>(base: P) -> PathBuf {
+    make(&base, ["indexes", "seen"])
 }
 
-pub fn hashes_path() -> PathBuf {
-    ["data", "hashes"].iter().collect()
+pub fn data_path<P: AsRef<std::path::Path>>(base: P) -> PathBuf {
+    make(&base, ["data", "data"])
 }
 
-pub fn stream_path(stream: &str) -> PathBuf {
-    ["streams", stream, "stream"].iter().collect()
+pub fn hashes_path<P: AsRef<std::path::Path>>(base: P) -> PathBuf {
+    make(&base, ["data", "hashes"])
 }
 
-pub fn stream_config(stream: &str) -> PathBuf {
-    ["streams", stream, "config.yaml"].iter().collect()
+pub fn stream_path<P: AsRef<std::path::Path>>(base: P, stream: &str) -> PathBuf {
+    make(&base, ["streams", stream, "stream"])
+}
+
+pub fn stream_config<P: AsRef<std::path::Path>>(base: P, stream: &str) -> PathBuf {
+    make(&base, ["streams", stream, "config.yaml"])
 }
 
 /// Clean up all temporary stream directories

@@ -59,12 +59,12 @@ impl BlkArchive {
     }
 
     pub fn data_size(&self) -> std::io::Result<u64> {
-        fn file_size(path: &PathBuf) -> std::io::Result<u64> {
+        fn file_size(path: &Path) -> std::io::Result<u64> {
             fs::metadata(path).map(|meta| meta.len())
         }
 
-        let base_path = self.archive.clone();
-        let data_size = file_size(&base_path.join("data/data"))?;
+        let data_path = self.archive.join("data/data");
+        let data_size = file_size(&data_path)?;
         Ok(data_size)
     }
 

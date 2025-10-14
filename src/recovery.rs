@@ -9,6 +9,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::paths::*;
+
 /// Magic number to identify recovery checkpoint files
 const RECOVERY_MAGIC: u64 = 0x52435652594d4147; // "RCVRYMA" + "G"
 
@@ -197,19 +199,16 @@ impl RecoveryCheckpoint {
     /// If the last operation completed successfully, the files will already be at
     /// these sizes, making this a no-op. If the last operation was interrupted,
     /// this truncates files back to the last known-good state.
-    pub fn apply<P: AsRef<Path>>(&self, base_path: P) -> Result<()> {
-        let base_path = base_path.as_ref();
+    pub fn apply<P: AsRef<Path>>(&self, archive_dir: P) -> Result<()> {
+        let archive_dir_ref = archive_dir.as_ref();
 
         // Truncate hashes file (will fail if missing)
-        let hashes_path = base_path.join(crate::paths::hashes_path());
+        let hashes_path = hashes_path(archive_dir_ref);
         Self::truncate_file(&hashes_path, self.hashes_file_size)?;
-
-        // Truncate data slab files (MultiFile mode only - always used for data)
-        let data_path = base_path.join(crate::paths::data_path());
 
         // Truncate the current write file (will fail if missing)
         let current_file_path =
-            crate::slab::multi_file::file_id_to_path(&data_path, self.data_slab_file_id);
+            crate::slab::multi_file::file_id_to_path(archive_dir_ref, self.data_slab_file_id);
         Self::truncate_file(&current_file_path, self.data_slab_file_size)?;
 
         // Note: Older files (file_id < data_slab_file_id) are fully written and don't
@@ -217,7 +216,7 @@ impl RecoveryCheckpoint {
         // Remove any files with ID > data_slab_file_id (created after checkpoint)
         let mut file_id = self.data_slab_file_id + 1;
         loop {
-            let file_path = crate::slab::multi_file::file_id_to_path(&data_path, file_id);
+            let file_path = crate::slab::multi_file::file_id_to_path(archive_dir_ref, file_id);
             if file_path.exists() {
                 std::fs::remove_file(&file_path)
                     .with_context(|| format!("Failed to remove extra file: {:?}", file_path))?;
@@ -311,20 +310,20 @@ pub fn check_point_file() -> PathBuf {
 ///
 /// This collects metadata from all files involved in the pack operation:
 pub fn create_checkpoint_from_files<P: AsRef<Path>>(
-    base_path: P,
+    archive_dir: P,
     data_slab_file_id: u32,
 ) -> Result<RecoveryCheckpoint> {
-    let base_path = base_path.as_ref();
+    let base_path = archive_dir.as_ref();
 
     // Get hashes file size
-    let hashes_path = base_path.join(crate::paths::hashes_path());
+    let hashes_path = hashes_path(base_path);
     let hashes_file_size = std::fs::metadata(&hashes_path)
         .with_context(|| format!("Failed to get metadata for hashes file: {:?}", hashes_path))?
         .len();
 
     // Get data slab file size (MultiFile mode only)
-    let data_path = base_path.join(crate::paths::data_path());
-    let file_path = crate::slab::multi_file::file_id_to_path(&data_path, data_slab_file_id);
+    let file_path =
+        crate::slab::multi_file::file_id_to_path(archive_dir.as_ref(), data_slab_file_id);
     let data_slab_file_size = std::fs::metadata(&file_path)
         .with_context(|| format!("Failed to get metadata for data file: {:?}", file_path))?
         .len();
@@ -340,11 +339,11 @@ pub fn create_checkpoint_from_files<P: AsRef<Path>>(
 ///
 /// This should be called before creating a checkpoint to ensure all
 /// buffered data is written to disk.
-pub fn sync_archive<P: AsRef<Path>>(base_path: P, data_slab_file_id: u32) -> Result<()> {
-    let base_path = base_path.as_ref();
+pub fn sync_archive<P: AsRef<Path>>(archive_dir: P, data_slab_file_id: u32) -> Result<()> {
+    let archive_dir_ref = archive_dir.as_ref();
 
     // Sync hashes file
-    let hashes_path = base_path.join(crate::paths::hashes_path());
+    let hashes_path = hashes_path(archive_dir_ref);
     if hashes_path.exists() {
         let file = File::open(&hashes_path)
             .with_context(|| format!("Failed to open hashes file: {:?}", hashes_path))?;
@@ -357,7 +356,7 @@ pub fn sync_archive<P: AsRef<Path>>(base_path: P, data_slab_file_id: u32) -> Res
     }
 
     // Sync hashes index file (cuckoo filter - "seen")
-    let index_path = base_path.join(crate::paths::index_path());
+    let index_path = index_path(archive_dir_ref);
     if index_path.exists() {
         let file = File::open(&index_path)
             .with_context(|| format!("Failed to open index file: {:?}", index_path))?;
@@ -387,9 +386,8 @@ pub fn sync_archive<P: AsRef<Path>>(base_path: P, data_slab_file_id: u32) -> Res
     }
 
     // Sync data slab files (MultiFile mode only - sync all files up to current file_id)
-    let data_path = base_path.join(crate::paths::data_path());
     for file_id in 0..=data_slab_file_id {
-        let file_path = crate::slab::multi_file::file_id_to_path(&data_path, file_id);
+        let file_path = crate::slab::multi_file::file_id_to_path(archive_dir_ref, file_id);
         let file = File::open(&file_path)
             .with_context(|| format!("Failed to open data file: {:?}", file_path))?;
         file.sync_all()?;

@@ -49,12 +49,12 @@ pub fn local_slab_from_global(global_slab: u32) -> u32 {
     global_slab % SLABS_PER_FILE
 }
 
-pub fn file_id_to_path(base_path: &Path, file_id: u32) -> PathBuf {
+pub fn file_id_to_path<P: AsRef<std::path::Path>>(base_path: P, file_id: u32) -> PathBuf {
     let level0 = file_id / (SUBDIRS_PER_DIR * FILES_PER_SUBDIR);
     let level1 = (file_id / FILES_PER_SUBDIR) % SUBDIRS_PER_DIR;
 
-    base_path.join(format!(
-        "slabs/{:03}/{:03}/file_{:010}",
+    base_path.as_ref().join(format!(
+        "data/data/slabs/{:03}/{:03}/file_{:010}",
         level0, level1, file_id
     ))
 }
@@ -128,12 +128,12 @@ impl FileHandleCache {
 //------------------------------------------------
 // Helper function to discover existing files
 
-fn discover_existing_files(base_path: &Path) -> Result<(u32, u32)> {
+fn discover_existing_files<P: AsRef<std::path::Path>>(archive_dir: P) -> Result<(u32, u32)> {
     let mut file_id = 0;
     let mut total_slabs = 0;
 
     loop {
-        let file_path = file_id_to_path(base_path, file_id);
+        let file_path = file_id_to_path(&archive_dir, file_id);
         if !file_path.exists() {
             break;
         }
@@ -144,11 +144,11 @@ fn discover_existing_files(base_path: &Path) -> Result<(u32, u32)> {
     Ok((file_id, total_slabs))
 }
 
-pub fn current_active_data_slab(base_path: &Path) -> Result<PathBuf> {
+pub fn current_active_data_slab<P: AsRef<std::path::Path>>(base_path: P) -> Result<PathBuf> {
     let mut file_id = 0;
     let mut last_data_file = PathBuf::new();
     loop {
-        let file_path = file_id_to_path(base_path, file_id);
+        let file_path = file_id_to_path(&base_path, file_id);
         if !file_path.exists() {
             break;
         }
@@ -186,11 +186,11 @@ pub struct MultiFile {
 }
 
 impl MultiFile {
-    pub fn fix_data_file_slab_indexes(base_path: &Path) -> Result<()> {
+    pub fn fix_data_file_slab_indexes<P: AsRef<Path>>(base_path: P) -> Result<()> {
         let mut file_id = 0;
 
         loop {
-            let file_path = file_id_to_path(base_path, file_id);
+            let file_path = file_id_to_path(&base_path, file_id);
             if !file_path.exists() {
                 break;
             }
@@ -241,16 +241,20 @@ impl MultiFile {
         queue_depth: usize,
         cache_nr_entries: usize,
     ) -> Result<Self> {
-        let base_path = base_path.as_ref().to_path_buf();
+        //let base_path = paths::data_path(base_path.as_ref().to_path_buf());
+        let base_path = base_path.as_ref();
 
         // Discover existing files
-        let (num_files, total_slabs) = discover_existing_files(&base_path)?;
+        let (num_files, total_slabs) = discover_existing_files(base_path)?;
         if num_files == 0 {
-            return Err(anyhow::anyhow!("No existing slab files found"));
+            return Err(anyhow::anyhow!(
+                "No existing slab files found in {:?}",
+                base_path
+            ));
         }
 
         let current_file_id = num_files - 1;
-        let current_file_path = file_id_to_path(&base_path, current_file_id);
+        let current_file_path = file_id_to_path(base_path, current_file_id);
 
         // Open the last file for writing
         let current_write_file =
@@ -261,16 +265,20 @@ impl MultiFile {
         // Determine compression from first file, currently they're all compressed or none of them
         // are.
         let compressed = {
-            let sf = SlabFile::open_for_read(file_id_to_path(&base_path, 0), 1)?;
+            let sf = SlabFile::open_for_read(file_id_to_path(base_path, 0), 1)?;
             sf.compressed
         };
 
         Ok(Self {
-            base_path: base_path.clone(),
+            base_path: base_path.to_path_buf(),
             write_file: Some(current_write_file),
             write_file_id: current_file_id,
             write_file_slab_count: current_file_slab_count,
-            file_cache: FileHandleCache::new(base_path, MAX_OPEN_FILES, cache_nr_entries),
+            file_cache: FileHandleCache::new(
+                base_path.to_path_buf(),
+                MAX_OPEN_FILES,
+                cache_nr_entries,
+            ),
             total_slabs,
             queue_depth,
             compressed,
@@ -278,21 +286,26 @@ impl MultiFile {
         })
     }
 
-    pub fn open_for_read<P: AsRef<Path>>(base_path: P, cache_nr_entries: usize) -> Result<Self> {
-        let base_path = base_path.as_ref().to_path_buf();
-
+    pub fn open_for_read<P: AsRef<Path>>(archive_dir: P, cache_nr_entries: usize) -> Result<Self> {
         // Discover existing files
-        let (num_files, total_slabs) = discover_existing_files(&base_path)?;
+        let (num_files, total_slabs) = discover_existing_files(&archive_dir)?;
         if num_files == 0 {
-            return Err(anyhow::anyhow!("No existing slab files found"));
+            return Err(anyhow::anyhow!(
+                "No existing slab files found in {:?}",
+                archive_dir.as_ref()
+            ));
         }
 
         Ok(Self {
-            base_path: base_path.clone(),
+            base_path: archive_dir.as_ref().to_path_buf(),
             write_file: None,
             write_file_id: 0,
             write_file_slab_count: 0,
-            file_cache: FileHandleCache::new(base_path, 10, cache_nr_entries),
+            file_cache: FileHandleCache::new(
+                archive_dir.as_ref().to_path_buf(),
+                10,
+                cache_nr_entries,
+            ),
             total_slabs,
             queue_depth: 1,
             compressed: false,
@@ -513,31 +526,31 @@ mod tests {
         // File 0: level0=0, level1=0
         assert_eq!(
             file_id_to_path(&base, 0),
-            PathBuf::from("/tmp/test/slabs/000/000/file_0000000000")
+            PathBuf::from("/tmp/test/data/data/slabs/000/000/file_0000000000")
         );
 
         // File 99: level0=0, level1=0 (still in first subdir)
         assert_eq!(
             file_id_to_path(&base, 99),
-            PathBuf::from("/tmp/test/slabs/000/000/file_0000000099")
+            PathBuf::from("/tmp/test/data/data/slabs/000/000/file_0000000099")
         );
 
         // File 100: level0=0, level1=1 (second subdir)
         assert_eq!(
             file_id_to_path(&base, 100),
-            PathBuf::from("/tmp/test/slabs/000/001/file_0000000100")
+            PathBuf::from("/tmp/test/data/data/slabs/000/001/file_0000000100")
         );
 
         // File 9999: level0=0, level1=99
         assert_eq!(
             file_id_to_path(&base, 9999),
-            PathBuf::from("/tmp/test/slabs/000/099/file_0000009999")
+            PathBuf::from("/tmp/test/data/data/slabs/000/099/file_0000009999")
         );
 
         // File 10000: level0=1, level1=0
         assert_eq!(
             file_id_to_path(&base, 10000),
-            PathBuf::from("/tmp/test/slabs/001/000/file_0000010000")
+            PathBuf::from("/tmp/test/data/data/slabs/001/000/file_0000010000")
         );
 
         // File u32::MAX: maximum possible file_id
@@ -545,7 +558,7 @@ mod tests {
         // level1 = (4294967295 / 100) % 100 = 72
         assert_eq!(
             file_id_to_path(&base, u32::MAX),
-            PathBuf::from("/tmp/test/slabs/429496/072/file_4294967295")
+            PathBuf::from("/tmp/test/data/data/slabs/429496/072/file_4294967295")
         );
     }
 
@@ -556,19 +569,19 @@ mod tests {
         // Slab 0 is in file 0
         assert_eq!(
             path_for_global_slab(&base, 0),
-            PathBuf::from("/tmp/test/slabs/000/000/file_0000000000")
+            PathBuf::from("/tmp/test/data/data/slabs/000/000/file_0000000000")
         );
 
         // Slab SLABS_PER_FILE is in file 1
         assert_eq!(
             path_for_global_slab(&base, SLABS_PER_FILE),
-            PathBuf::from("/tmp/test/slabs/000/000/file_0000000001")
+            PathBuf::from("/tmp/test/data/data/slabs/000/000/file_0000000001")
         );
 
         // Slab 100 * SLABS_PER_FILE is in file 100
         assert_eq!(
             path_for_global_slab(&base, 100 * SLABS_PER_FILE),
-            PathBuf::from("/tmp/test/slabs/000/001/file_0000000100")
+            PathBuf::from("/tmp/test/data/data/slabs/000/001/file_0000000100")
         );
 
         // Slab u32::MAX: maximum possible global_slab
@@ -578,7 +591,7 @@ mod tests {
         // level1 = (4198404 / 100) % 100 = 84
         assert_eq!(
             path_for_global_slab(&base, u32::MAX),
-            PathBuf::from("/tmp/test/slabs/419/084/file_0004198404")
+            PathBuf::from("/tmp/test/data/data/slabs/419/084/file_0004198404")
         );
     }
 

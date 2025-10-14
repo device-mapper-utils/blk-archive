@@ -4,7 +4,6 @@ use serde_json::to_string_pretty;
 use anyhow::Result;
 use chrono::prelude::*;
 use clap::ArgMatches;
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,9 +20,7 @@ fn fmt_time(t: &chrono::DateTime<FixedOffset>) -> String {
 pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     let archive_dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap()).canonicalize()?;
 
-    env::set_current_dir(&archive_dir)?;
-
-    let streams_path = Path::new("./streams");
+    let streams_path = archive_dir.join("streams");
     let paths = fs::read_dir(streams_path)?;
     let stream_ids = paths
         .filter_map(|entry| entry.ok().and_then(|e| e.file_name().into_string().ok()))
@@ -32,7 +29,7 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
 
     let mut streams = Vec::new();
     for id in stream_ids {
-        let cfg = config::read_stream_config(&id)?;
+        let cfg = config::read_stream_config(&archive_dir, &id)?;
         streams.push((id, config::to_date_time(&cfg.pack_time), cfg));
     }
 

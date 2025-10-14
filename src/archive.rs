@@ -11,11 +11,13 @@ use crate::slab::MultiFile;
 use crate::slab::*;
 use std::io::Write;
 use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const SLAB_SIZE_TARGET: usize = 4 * 1024 * 1024;
 
 pub struct Data<'a, S: SlabStorage = MultiFile> {
+    archive_dir: PathBuf,
     seen: CuckooFilter,
     hashes: lru::LruCache<u32, ByHash>,
 
@@ -94,6 +96,7 @@ fn build_cuckoo_from_hashes(
 
 impl<'a, S: SlabStorage> Data<'a, S> {
     pub fn new(
+        archive_dir: &Path,
         data_file: S,
         hashes_file: Arc<Mutex<SlabFile<'a>>>,
         slab_capacity: usize,
@@ -114,13 +117,14 @@ impl<'a, S: SlabStorage> Data<'a, S> {
         // Read this last. If we get an error reading up the file, we
         // can re-build it from the hashes file.
         let seen = {
-            match CuckooFilter::read(paths::index_path()) {
+            match CuckooFilter::read(paths::index_path(archive_dir)) {
                 Ok(c) => c,
                 Err(_) => build_cuckoo_from_hashes(&hashes_file, INITIAL_SIZE)?,
             }
         };
 
         Ok(Self {
+            archive_dir: archive_dir.to_path_buf(),
             seen,
             hashes,
             data_file,
@@ -334,12 +338,12 @@ impl<'a, S: SlabStorage> Data<'a, S> {
             .with_context(|| "Failed to sync data file")?;
 
         // Write cuckoo filter
-        self.seen.write(paths::index_path())?;
+        let index_path = paths::index_path(&self.archive_dir);
+        self.seen.write(&index_path)?;
 
         // Sync the directory that is holding the cuckoo filter
         // Note: The offsets file could be re-built if needed.
-        let index = paths::index_path();
-        let cuckoo_parent = index.parent().unwrap();
+        let cuckoo_parent = index_path.parent().unwrap();
         crate::recovery::sync_directory(cuckoo_parent)
             .with_context(|| "Failed to sync cuckoo filter directory")?;
 
@@ -363,11 +367,11 @@ impl<'a, S: SlabStorage> Data<'a, S> {
         drop(hashes_file);
 
         // Write cuckoo filter
-        self.seen.write(paths::index_path())?;
+        let index_path = paths::index_path(&self.archive_dir);
+        self.seen.write(&index_path)?;
 
         // Sync the directory holding the cuckoo filter
-        let index = paths::index_path();
-        let cuckoo_parent = index.parent().unwrap();
+        let cuckoo_parent = index_path.parent().unwrap();
         crate::recovery::sync_directory(cuckoo_parent)?;
 
         Ok(())
@@ -383,8 +387,9 @@ impl<'a, S: SlabStorage> Data<'a, S> {
         self.data_file
             .close()
             .expect("Data.drop: data_file.close() error!");
+        let index_path = paths::index_path(&self.archive_dir);
         self.seen
-            .write(paths::index_path())
+            .write(&index_path)
             .expect("Data.drop: seen.write() error!");
     }
 }
@@ -430,10 +435,10 @@ impl<'a> Data<'a, MultiFile> {
         self.sync_for_file_boundary()?;
 
         // Create checkpoint with current file_id BEFORE crossing boundary
-        let cwd = std::env::current_dir()?;
-        let checkpoint_path = cwd.join(crate::recovery::check_point_file());
-        let checkpoint = crate::recovery::create_checkpoint_from_files(&cwd, current_file_id)?;
-        checkpoint.write(checkpoint_path)?;
+        let checkpoint_path = self.archive_dir.join(crate::recovery::check_point_file());
+        let checkpoint =
+            crate::recovery::create_checkpoint_from_files(&self.archive_dir, current_file_id)?;
+        checkpoint.write(&checkpoint_path)?;
 
         // Now it's safe to cross the boundary
         self.data_file.cross_file_boundary()?;
@@ -518,17 +523,17 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
         )));
     }
 
-    let checkpoint_path = std::path::Path::new(archive_path.as_ref().to_path_buf().as_path())
+    let checkpoint_path = archive_path
+        .as_ref()
         .join(crate::recovery::check_point_file());
     if RecoveryCheckpoint::exists(&checkpoint_path) {
         let checkpoint = RecoveryCheckpoint::read(&checkpoint_path)?;
-        checkpoint.apply(&archive_path)?;
+        checkpoint.apply(archive_path.as_ref())?;
     }
 
-    let data_base_path = archive_path.as_ref().iter().as_path().join(data_path());
-    let data_file = current_active_data_slab(&data_base_path)?;
+    let data_file = current_active_data_slab(&archive_path)?;
 
-    let hashes_file = archive_path.as_ref().iter().as_path().join(hashes_path());
+    let hashes_file = hashes_path(&archive_path);
     let data_path = data_file.as_ref();
     let hashes_path = hashes_file.as_ref();
 
@@ -597,12 +602,7 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
         //
         // TODO: We may also have to go back through the slab files fixing up the index files.
         // because if the error exists in anyone of them, our numbers won't match
-        let base_path = archive_path
-            .as_ref()
-            .iter()
-            .as_path()
-            .join(paths::data_path());
-        let data_mf = MultiFile::open_for_read(base_path.clone(), 0)?;
+        let data_mf = MultiFile::open_for_read(&archive_path, 0)?;
         let data_count = data_mf.get_nr_slabs();
         drop(data_mf);
 
@@ -610,9 +610,9 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
             // if we get here, we need to walk all the data slab files and regen all of the index
             // files.  When that is done we will fetch the number of data slabs and if it doesn't
             // match the hash slab count, the archive is in a bad state.
-            MultiFile::fix_data_file_slab_indexes(&base_path)?;
+            MultiFile::fix_data_file_slab_indexes(&archive_path)?;
 
-            let data_mf = MultiFile::open_for_read(base_path.clone(), 0)?;
+            let data_mf = MultiFile::open_for_read(&archive_path, 0)?;
             let data_count = data_mf.get_nr_slabs();
 
             if data_count as usize != hashes_count {
@@ -683,16 +683,16 @@ mod tests {
         })?;
         let slab_capacity = calculate_slab_capacity(values.block_size, values.hash_cache_size_meg);
 
-        let data_file = MultiFile::open_for_write(data_path(), 10, slab_capacity)?;
+        let data_file = MultiFile::open_for_write(archive_path, 10, slab_capacity)?;
         let hashes_file = Arc::new(Mutex::new(
-            SlabFileBuilder::open(hashes_path())
+            SlabFileBuilder::open(hashes_path(&archive_path))
                 .write(true)
                 .queue_depth(16)
                 .build()
                 .context("couldn't open hashes slab file")?,
         ));
 
-        let mut archive = Data::new(data_file, hashes_file.clone(), 10)?;
+        let mut archive = Data::new(archive_path, data_file, hashes_file.clone(), 10)?;
 
         // Check initial state - should not be at boundary with empty archive
         assert!(
@@ -751,7 +751,7 @@ mod tests {
         );
 
         // Check for the existence of the new data file and index
-        let new_file_path = file_id_to_path(archive_path.join(paths::data_path()).as_path(), 1);
+        let new_file_path = file_id_to_path(archive_path, 1);
 
         assert!(
             new_file_path.exists(),
@@ -794,16 +794,16 @@ mod tests {
         })?;
         let slab_capacity = calculate_slab_capacity(values.block_size, values.hash_cache_size_meg);
 
-        let data_file = MultiFile::open_for_write(data_path(), 10, slab_capacity)?;
+        let data_file = MultiFile::open_for_write(archive_path, 10, slab_capacity)?;
         let hashes_file = Arc::new(Mutex::new(
-            SlabFileBuilder::open(hashes_path())
+            SlabFileBuilder::open(hashes_path(&archive_path))
                 .write(true)
                 .queue_depth(16)
                 .build()
                 .context("couldn't open hashes slab file")?,
         ));
 
-        let archive = Data::new(data_file, hashes_file.clone(), 10)?;
+        let archive = Data::new(archive_path, data_file, hashes_file.clone(), 10)?;
 
         // Create a checkpoint pointing to file 0 only
         let checkpoint_path = archive_path.join(recovery::check_point_file());
@@ -816,7 +816,7 @@ mod tests {
         // 2. New file gets created
         // 3. CRASH occurs before checkpoint is written
 
-        let file1_path = file_id_to_path(archive_path.join(paths::data_path()).as_path(), 1);
+        let file1_path = file_id_to_path(&archive_path, 1);
         std::fs::write(&file1_path, b"corrupt data that should be deleted")?;
         let mut file1_offsets = file1_path.clone();
         file1_offsets.set_extension("offsets");
@@ -846,7 +846,7 @@ mod tests {
         );
 
         // Verify file 0 still exists
-        let file0_path = file_id_to_path(archive_path.join(paths::data_path()).as_path(), 0);
+        let file0_path = file_id_to_path(archive_path, 0);
         let mut file0_index_path = file0_path.clone();
         file0_index_path.set_extension("offsets");
 

@@ -4,7 +4,7 @@ use blk_archive::slab::offsets::validate_slab_offsets_file;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const FILE_MAGIC: u64 = 0xb927f96a6b611180;
 const SLAB_MAGIC: u64 = 0x20565137a3100a7c;
@@ -130,7 +130,7 @@ fn offsets_path(slab_path: PathBuf) -> PathBuf {
     offsets_path
 }
 
-fn verify_slab_file_header(slab_path: &PathBuf) -> Result<(bool, u64)> {
+fn verify_slab_file_header(slab_path: &Path) -> Result<(bool, u64)> {
     let mut data = OpenOptions::new()
         .read(true)
         .write(false)
@@ -194,7 +194,7 @@ fn verify_slab_file_header(slab_path: &PathBuf) -> Result<(bool, u64)> {
     Ok((compressed, file_size))
 }
 
-fn verify_slabs(slab_path: &PathBuf, verbose: bool, max_slabs: usize) -> Result<Vec<u64>> {
+fn verify_slabs(slab_path: &Path, verbose: bool, max_slabs: usize) -> Result<Vec<u64>> {
     let mut data = OpenOptions::new()
         .read(true)
         .write(false)
@@ -312,7 +312,7 @@ fn verify_slabs(slab_path: &PathBuf, verbose: bool, max_slabs: usize) -> Result<
     Ok(offsets)
 }
 
-fn verify_offsets_file(offsets_path: &PathBuf, verify_crc: bool) -> Result<usize> {
+fn verify_offsets_file(offsets_path: &Path, verify_crc: bool) -> Result<usize> {
     let is_valid = validate_slab_offsets_file(offsets_path, verify_crc)?;
 
     if !is_valid {
@@ -351,7 +351,7 @@ fn verify_offsets_file(offsets_path: &PathBuf, verify_crc: bool) -> Result<usize
     Ok(count as usize)
 }
 
-fn compare_offsets(computed: &[u64], offsets_path: &PathBuf) -> Result<()> {
+fn compare_offsets(computed: &[u64], offsets_path: &Path) -> Result<()> {
     use blk_archive::slab::offsets::SlabOffsets;
 
     let offsets = SlabOffsets::open(offsets_path, false)?;
@@ -383,7 +383,7 @@ fn compare_offsets(computed: &[u64], offsets_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn dump_offsets(offsets_path: &PathBuf) -> Result<()> {
+fn dump_offsets(offsets_path: &Path) -> Result<()> {
     use blk_archive::slab::offsets::SlabOffsets;
 
     let offsets = SlabOffsets::open(offsets_path, false)?;
