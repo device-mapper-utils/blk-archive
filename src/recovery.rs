@@ -6,10 +6,47 @@
 use anyhow::{Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::paths::*;
+
+/// Extension trait for syncing the parent directory of a path
+///
+/// This trait provides a method to sync the parent directory to ensure
+/// directory metadata changes (like file creation or removal) are persisted.
+pub trait SyncParentExt {
+    /// Sync the parent directory of this path
+    ///
+    /// The path must be a directory, and it must have a parent directory.
+    /// This method will open the parent directory read-only and call sync_all on it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The path does not exist or is not a directory
+    /// - The path has no parent directory
+    /// - The parent directory cannot be opened
+    /// - The sync operation fails
+    fn sync_parent(&self) -> io::Result<()>;
+}
+
+impl SyncParentExt for Path {
+    fn sync_parent(&self) -> io::Result<()> {
+        // Ensure the path has a parent directory
+        let parent = self.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("sync_parent: path has no parent directory: {:?}", self),
+            )
+        })?;
+
+        // Open the parent directory read-only and sync it
+        let dir = File::open(parent)?;
+        dir.sync_all()?;
+        Ok(())
+    }
+}
 
 /// Magic number to identify recovery checkpoint files
 const RECOVERY_MAGIC: u64 = 0x52435652594d4147; // "RCVRYMA" + "G"
@@ -106,19 +143,14 @@ impl RecoveryCheckpoint {
         drop(file);
 
         // Sync the parent directory to ensure the temp file is visible
-        if let Some(parent) = path.parent() {
-            sync_directory(parent)?;
-        }
+        path.sync_parent()?;
 
         // Atomically replace the old checkpoint file (POSIX atomic operation)
         std::fs::rename(&tmp_path, path)
             .with_context(|| format!("Failed to rename recovery file: {:?}", tmp_path))?;
 
         // Sync parent directory again to ensure rename is visible
-        if let Some(parent) = path.parent() {
-            sync_directory(parent)?;
-        }
-
+        path.sync_parent()?;
         Ok(())
     }
 
@@ -227,12 +259,8 @@ impl RecoveryCheckpoint {
                     std::fs::remove_file(&offsets_path)?;
                 }
 
-                let p = file_path.parent().with_context(|| {
-                    format!("We expected parent to exist for child {:?}", file_path)
-                })?;
-                crate::recovery::sync_directory(p)
-                    .with_context(|| format!("Error during directory sync of {:?}", p))?;
-
+                // Sync the parent directory to ensure file removals are visible
+                file_path.sync_parent()?;
                 file_id += 1;
             } else {
                 break;
@@ -291,16 +319,6 @@ impl Default for RecoveryCheckpoint {
     }
 }
 
-/// Sync a directory to ensure all metadata changes are persisted
-pub fn sync_directory<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path = path.as_ref();
-    let dir = File::open(path)
-        .with_context(|| format!("Failed to open directory for sync: {:?}", path))?;
-    dir.sync_all()
-        .with_context(|| format!("Failed to sync directory: {:?}", path))?;
-    Ok(())
-}
-
 /// Get the default recovery checkpoint file name
 pub fn check_point_file() -> PathBuf {
     PathBuf::from("recovery.checkpoint")
@@ -350,9 +368,7 @@ pub fn sync_archive<P: AsRef<Path>>(archive_dir: P, data_slab_file_id: u32) -> R
         file.sync_all()?;
 
         // Sync parent directory
-        if let Some(parent) = hashes_path.parent() {
-            sync_directory(parent)?;
-        }
+        hashes_path.sync_parent()?;
     }
 
     // Sync hashes index file (cuckoo filter - "seen")
@@ -363,9 +379,7 @@ pub fn sync_archive<P: AsRef<Path>>(archive_dir: P, data_slab_file_id: u32) -> R
         file.sync_all()?;
 
         // Sync parent directory
-        if let Some(parent) = index_path.parent() {
-            sync_directory(parent)?;
-        }
+        index_path.sync_parent()?;
     }
 
     // Sync hashes index offsets file ("seen.offsets")
@@ -380,9 +394,7 @@ pub fn sync_archive<P: AsRef<Path>>(archive_dir: P, data_slab_file_id: u32) -> R
         file.sync_all()?;
 
         // Sync parent directory
-        if let Some(parent) = index_offsets_path.parent() {
-            sync_directory(parent)?;
-        }
+        index_offsets_path.sync_parent()?;
     }
 
     // Sync data slab files (MultiFile mode only - sync all files up to current file_id)
@@ -398,9 +410,7 @@ pub fn sync_archive<P: AsRef<Path>>(archive_dir: P, data_slab_file_id: u32) -> R
         offsets_file.sync_all()?;
 
         // Sync parent directory
-        if let Some(parent) = file_path.parent() {
-            sync_directory(parent)?;
-        }
+        file_path.sync_parent()?;
     }
 
     Ok(())

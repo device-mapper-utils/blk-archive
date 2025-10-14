@@ -488,8 +488,8 @@ impl<'a> SlabFile<'a> {
 
             // Sync the directory that is holding the offsets file which also includes the data file
             // Note: The offsets file could be re-built if needed.
-            let parent = self.offsets_path.parent().unwrap();
-            crate::recovery::sync_directory(parent)?;
+            use crate::recovery::SyncParentExt;
+            self.offsets_path.sync_parent()?;
         }
         Ok(())
     }

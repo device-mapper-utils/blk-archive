@@ -343,9 +343,7 @@ impl<'a, S: SlabStorage> Data<'a, S> {
 
         // Sync the directory that is holding the cuckoo filter
         // Note: The offsets file could be re-built if needed.
-        let cuckoo_parent = index_path.parent().unwrap();
-        crate::recovery::sync_directory(cuckoo_parent)
-            .with_context(|| "Failed to sync cuckoo filter directory")?;
+        index_path.sync_parent()?;
 
         Ok(())
     }
@@ -371,8 +369,7 @@ impl<'a, S: SlabStorage> Data<'a, S> {
         self.seen.write(&index_path)?;
 
         // Sync the directory holding the cuckoo filter
-        let cuckoo_parent = index_path.parent().unwrap();
-        crate::recovery::sync_directory(cuckoo_parent)?;
+        index_path.sync_parent()?;
 
         Ok(())
     }
