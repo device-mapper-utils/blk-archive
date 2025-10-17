@@ -32,7 +32,7 @@ impl std::error::Error for FileBoundaryError {}
 // Multi-file configuration constants
 
 pub const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024 - 1; // 4GB - 1 byte (FAT32 limit)
-pub const SLABS_PER_FILE: u32 = (MAX_FILE_SIZE / SLAB_SIZE_TARGET as u64) as u32; // 1024 slabs per file
+pub const SLABS_PER_FILE: u32 = (MAX_FILE_SIZE / SLAB_SIZE_TARGET as u64) as u32; // 1023 slabs per file
 pub const FILES_PER_SUBDIR: u32 = 100; // 100 files per leaf directory
 pub const SUBDIRS_PER_DIR: u32 = 100; // 100 subdirs per directory
 
@@ -368,7 +368,6 @@ impl MultiFile {
     }
 
     pub fn write_slab(&mut self, data: &[u8]) -> Result<()> {
-        // Boundary crossing must be handled explicitly by caller
         if self.will_cross_boundary_on_next_write() {
             return Err(FileBoundaryError {
                 current_file_id: self.write_file_id,
@@ -480,6 +479,14 @@ impl SlabStorage for MultiFile {
     fn get_file_size(&self) -> u64 {
         self.get_file_size()
     }
+
+    fn will_cross_boundary_on_next_write(&self) -> bool {
+        self.will_cross_boundary_on_next_write()
+    }
+
+    fn cross_file_boundary(&mut self) -> Result<()> {
+        self.cross_file_boundary()
+    }
 }
 
 impl Drop for MultiFile {
@@ -501,6 +508,11 @@ mod tests {
         assert_eq!(file_id_from_global_slab(SLABS_PER_FILE), 1);
         assert_eq!(file_id_from_global_slab(2 * SLABS_PER_FILE - 1), 1);
         assert_eq!(file_id_from_global_slab(2 * SLABS_PER_FILE), 2);
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(1023, SLABS_PER_FILE);
     }
 
     #[test]

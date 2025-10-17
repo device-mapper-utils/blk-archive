@@ -119,10 +119,10 @@ pub fn build_cli() -> clap::Command {
                 .about("packs a stream into the archive")
                 .arg(
                     Arg::new("INPUT")
-                        .help("Specify a device or file to archive")
+                        .help("Specify one or more devices or files to archive")
                         .required(true)
                         .value_name("INPUT")
-                        .num_args(1)
+                        .num_args(1..)
                         .help_heading("Required Options"),
                 )
                 .arg(archive_arg.clone())

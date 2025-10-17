@@ -7,9 +7,10 @@ use serde_json::json;
 use serde_json::to_string_pretty;
 use size_display::Size;
 use std::boxed::Box;
+use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, FileTypeExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,7 +23,6 @@ use crate::hash::*;
 use crate::iovec::*;
 use crate::output::Output;
 use crate::paths::*;
-use crate::recovery;
 use crate::run_iter::*;
 use crate::slab::builder::*;
 use crate::slab::*;
@@ -137,6 +137,11 @@ impl<'a> DedupHandler<'a> {
     // client server with multiple clients and one server?
     fn ensure_extra_capacity(&mut self, blocks: usize) -> Result<()> {
         self.archive.ensure_extra_capacity(blocks)
+    }
+
+    /// Extract the archive, taking ownership and preventing Drop
+    fn take_archive(self) -> Data<'a> {
+        self.archive
     }
 }
 
@@ -310,12 +315,36 @@ impl Packer {
         mut self,
         archive_dir: &Path,
         hashes_file: Arc<Mutex<SlabFile<'static>>>,
-    ) -> Result<()> {
-        let mut splitter = ContentSensitiveSplitter::new(self.block_size as u32);
+        data_archive_opt: Option<Data<'static, MultiFile>>,
+        splitter: &mut ContentSensitiveSplitter,
+        is_last_file: bool,
+    ) -> Result<(u32, Data<'static, MultiFile>)> {
+        // Reuse existing Data archive or create a new one
+        let ad = if let Some(archive) = data_archive_opt {
+            archive
+        } else {
+            let hashes_per_slab = std::cmp::max(SLAB_SIZE_TARGET / self.block_size, 1);
+            let slab_capacity = ((self.hash_cache_size_meg * 1024 * 1024)
+                / std::mem::size_of::<Hash256>())
+                / hashes_per_slab;
 
-        let slab_capacity =
-            crate::archive::calculate_slab_capacity(self.block_size, self.hash_cache_size_meg);
-        let data_file = MultiFile::open_for_write(archive_dir, 128, slab_capacity)?;
+            let data_file = MultiFile::open_for_write(archive_dir, 128, slab_capacity)
+                .with_context(|| {
+                    format!(
+                        "Failed to open data slab file for writing (path: {:?}, capacity: {})",
+                        data_path(archive_dir),
+                        slab_capacity
+                    )
+                })?;
+            Data::new(archive_dir, data_file, hashes_file.clone(), slab_capacity).with_context(
+                || {
+                    format!(
+                        "Failed to create Data archive (block_size: {}, slab_capacity: {})",
+                        self.block_size, slab_capacity
+                    )
+                },
+            )?
+        };
 
         let (stream_id, temp_stream_dir, final_stream_dir) = new_stream_path(archive_dir)?;
 
@@ -325,13 +354,11 @@ impl Packer {
         let mut stream_path = temp_stream_dir.clone();
         stream_path.push("stream");
 
-        let stream_file = SlabFileBuilder::create(stream_path)
+        let stream_file = SlabFileBuilder::create(&stream_path)
             .queue_depth(16)
             .compressed(true)
             .build()
             .context("couldn't open stream slab file")?;
-
-        let ad = Data::new(archive_dir, data_file, hashes_file, slab_capacity)?;
 
         let mut handler = DedupHandler::new(stream_file, self.mapping_builder.clone(), ad)?;
 
@@ -386,19 +413,27 @@ impl Packer {
                 && last_checkpoint_time.elapsed() >= checkpoint_interval
             {
                 handler.archive.sync_checkpoint()?;
-                let data_slab_file_id =
-                    handler.archive.get_nr_data_slabs() / crate::slab::multi_file::SLABS_PER_FILE;
-                let checkpoint_path = archive_dir.join(recovery::check_point_file());
-                let checkpoint =
-                    recovery::create_checkpoint_from_files(archive_dir, data_slab_file_id)?;
-                checkpoint.write(checkpoint_path)?;
                 last_checkpoint_time = Instant::now();
             }
         }
 
-        splitter.complete(&mut handler)?;
+        // Only complete the splitter if this is the last file
+        // Otherwise just break to indicate non-contiguous data
+        if is_last_file {
+            // We need to consume the splitter, so create a temporary one to swap
+            let temp_splitter = ContentSensitiveSplitter::new(self.block_size as u32);
+            let final_splitter = std::mem::replace(splitter, temp_splitter);
+            final_splitter.complete(&mut handler)?;
+        } else {
+            // Just break between files, don't complete the splitter
+            splitter.next_break(&mut handler)?;
+        }
         self.output.report.progress(100);
-        handler.archive.flush()?;
+
+        // Complete the handler to flush and close the stream file for each file
+        handler
+            .complete()
+            .with_context(|| format!("error while completing the stream {:?}", stream_path))?;
 
         let input_hex_digest = input_digest.finalize().to_hex().to_string();
 
@@ -412,8 +447,7 @@ impl Packer {
         if self.output.json {
             // Should all the values simply be added to the json too?  We can always add entries, but
             // we can never take any away to maintains backwards compatibility with JSON consumers.
-            let result =
-                json!({ "stream_id": stream_id, "stats": handler.stats, "hash": input_hex_digest});
+            let result = json!({ "input_file": self.input_path, "stream_id": stream_id, "stats": handler.stats, "hash": input_hex_digest});
             println!("{}", to_string_pretty(&result).unwrap());
         } else {
             self.output
@@ -474,14 +508,6 @@ impl Packer {
         };
         config::write_stream_config(archive_dir, temp_stream_id, &cfg)?;
 
-        // Create final checkpoint after successful pack
-        handler.archive.sync_checkpoint()?;
-        let data_slab_file_id =
-            handler.archive.get_nr_data_slabs() / crate::slab::multi_file::SLABS_PER_FILE;
-        let checkpoint_path = archive_dir.join(recovery::check_point_file());
-        let checkpoint = recovery::create_checkpoint_from_files(archive_dir, data_slab_file_id)?;
-        checkpoint.write(checkpoint_path)?;
-
         // Atomically move temp stream directory to final location
         // This is the commit point - either the stream exists completely or not at all
         std::fs::rename(&temp_stream_dir, &final_stream_dir).with_context(|| {
@@ -493,7 +519,11 @@ impl Packer {
 
         //TODO: Sync stream directory?
 
-        Ok(())
+        // Extract the Data archive from the handler to return it for reuse
+        let archive = handler.take_archive();
+        let data_slab_file_id = archive.get_current_write_file_id();
+
+        Ok((data_slab_file_id, archive))
     }
 }
 
@@ -657,23 +687,48 @@ fn get_delta_args(matches: &ArgMatches) -> Result<Option<(String, PathBuf)>> {
     }
 }
 
+/// Resolve `path_str`, ensure it refers to a readable regular file or block device,
+/// and return the canonical absolute path (symlinks resolved).
+/// Linux-only (uses `FileTypeExt::is_block_device`).
+pub fn canonicalize_readable_regular_or_block(path_str: String) -> Result<PathBuf> {
+    let input = Path::new(&path_str);
+
+    // 1) Canonicalize (resolves symlinks, returns absolute path)
+    let canon = fs::canonicalize(input).with_context(|| format!("canonicalizing {:?}", input))?;
+
+    // 2) Stat the resolved target
+    let meta = fs::metadata(&canon).with_context(|| format!("metadata for {:?}", canon))?;
+    let ft = meta.file_type();
+
+    // 3) Must be a regular file OR a block device
+    if !ft.is_file() && !ft.is_block_device() {
+        return Err(anyhow!("not a regular file or block device: {:?}", canon));
+    }
+
+    // 4) Verify we can actually read it (covers permissions, RO mounts, etc.)
+    let _fh = OpenOptions::new()
+        .read(true)
+        .open(&canon)
+        .with_context(|| format!("opening for read {:?}", canon))?;
+    // (File handle drops here; open succeeded = readable)
+
+    Ok(canon)
+}
+
 pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     let archive_dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap()).canonicalize()?;
-    let input_file = Path::new(matches.get_one::<String>("INPUT").unwrap());
-    let input_name = input_file
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    let input_file = Path::new(matches.get_one::<String>("INPUT").unwrap()).canonicalize()?;
+    let input_files: Vec<&String> = matches.get_many::<String>("INPUT").unwrap().collect();
 
     let sync_point_secs = *matches.get_one::<u64>("SYNC_POINT_SECS").unwrap_or(&15u64);
     let config = config::read_config(&archive_dir, matches)?;
 
-    output
-        .report
-        .set_title(&format!("Building packer {} ...", input_file.display()));
+    // Check that multiple inputs are not allowed with delta mode
+    let delta_args = get_delta_args(matches)?;
+    if delta_args.is_some() && input_files.len() > 1 {
+        return Err(anyhow!(
+            "Multiple INPUTs are not allowed when using --delta-stream and --delta-device"
+        ));
+    }
 
     let hashes_file = Arc::new(Mutex::new(
         SlabFileBuilder::open(hashes_path(&archive_dir))
@@ -683,40 +738,196 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
             .context("couldn't open hashes slab file")?,
     ));
 
-    let packer = if let Some((delta_stream, delta_device)) = get_delta_args(matches)? {
-        thin_delta_packer(
+    // Categorize input files into delta, thin, and thick lists
+    let mut delta_block_devs = Vec::new();
+    let mut thin_block_devs = Vec::new();
+    let mut thick_input = Vec::new();
+
+    for input_file_str in input_files {
+        let result = canonicalize_readable_regular_or_block(input_file_str.to_string());
+
+        if let Err(e) = result {
+            eprintln!(
+                "error processing {} for reason {}, skipping!",
+                input_file_str, e
+            );
+            continue;
+        }
+
+        let input_file = result.unwrap();
+
+        if delta_args.is_some() {
+            delta_block_devs.push(input_file);
+        } else if is_thin_device(&input_file).with_context(|| {
+            format!(
+                "Failed to check if {} is a thin device",
+                input_file.display()
+            )
+        })? {
+            thin_block_devs.push(input_file);
+        } else {
+            // As we know it was either a file or a block device, and it isn't a delta or thin
+            // simply add.
+            thick_input.push(input_file);
+        }
+    }
+
+    let mut final_archive: Option<Data<MultiFile>> = None;
+
+    // Process delta devices with one packer
+    if !delta_block_devs.is_empty() {
+        if let Some((delta_stream, delta_device)) = &delta_args {
+            final_archive = process_file_list(
+                &archive_dir,
+                &delta_block_devs,
+                output.clone(),
+                &config,
+                hashes_file.clone(),
+                sync_point_secs,
+                |output, input_file, input_name, config, hashes_file, sync_point_secs| {
+                    thin_delta_packer(
+                        &archive_dir,
+                        output,
+                        input_file,
+                        input_name,
+                        config,
+                        delta_device,
+                        delta_stream,
+                        hashes_file,
+                        sync_point_secs,
+                    )
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to process delta device list ({} files)",
+                    delta_block_devs.len()
+                )
+            })?;
+        }
+    }
+
+    // Process thin devices with one packer
+    if !thin_block_devs.is_empty() {
+        final_archive = process_file_list(
             &archive_dir,
+            &thin_block_devs,
             output.clone(),
-            &input_file,
-            input_name,
             &config,
-            &delta_device,
-            &delta_stream,
             hashes_file.clone(),
             sync_point_secs,
-        )?
-    } else if is_thin_device(&input_file)? {
-        thin_packer(
-            output.clone(),
-            &input_file,
-            input_name,
-            &config,
-            sync_point_secs,
-        )?
-    } else {
-        thick_packer(
-            output.clone(),
-            &input_file,
-            input_name,
-            &config,
-            sync_point_secs,
-        )?
-    };
+            |output, input_file, input_name, config, _hashes_file, sync_point_secs| {
+                thin_packer(output, input_file, input_name, config, sync_point_secs)
+            },
+        )
+        .with_context(|| {
+            format!(
+                "Failed to process thin device list ({} files)",
+                thin_block_devs.len()
+            )
+        })?;
+    }
 
-    output
-        .report
-        .set_title(&format!("Packing {} ...", input_file.display()));
-    packer.pack(&archive_dir, hashes_file)
+    // Process thick devices/files with one packer
+    if !thick_input.is_empty() {
+        final_archive = process_file_list(
+            &archive_dir,
+            &thick_input,
+            output.clone(),
+            &config,
+            hashes_file.clone(),
+            sync_point_secs,
+            |output, input_file, input_name, config, _hashes_file, sync_point_secs| {
+                thick_packer(output, input_file, input_name, config, sync_point_secs)
+            },
+        )
+        .with_context(|| {
+            format!(
+                "Failed to process thick device/file list ({} files)",
+                thick_input.len()
+            )
+        })?;
+    }
+
+    // Write final checkpoint after all files are processed
+    if let Some(mut archive) = final_archive {
+        archive.sync_checkpoint()?;
+    }
+
+    Ok(())
+}
+
+fn process_file_list<F>(
+    archive_dir: &Path,
+    files: &[PathBuf],
+    output: Arc<Output>,
+    config: &config::Config,
+    hashes_file: Arc<Mutex<SlabFile<'static>>>,
+    sync_point_secs: u64,
+    packer_factory: F,
+) -> Result<Option<Data<'static, MultiFile>>>
+where
+    F: Fn(
+        Arc<Output>,
+        &Path,
+        String,
+        &config::Config,
+        Arc<Mutex<SlabFile<'static>>>,
+        u64,
+    ) -> Result<Packer>,
+{
+    let mut data_archive_opt: Option<Data<'static, MultiFile>> = None;
+
+    // Create a single splitter to be reused across all files
+    let mut splitter = ContentSensitiveSplitter::new(config.block_size as u32);
+
+    for (idx, input_file) in files.iter().enumerate() {
+        let is_last_file = idx == files.len() - 1;
+        let input_name = input_file
+            .file_name()
+            .ok_or_else(|| anyhow!("Input file has no filename: {:?}", input_file))
+            .with_context(|| format!("Failed to extract filename from path: {:?}", input_file))?
+            .to_str()
+            .ok_or_else(|| anyhow!("Input filename is not valid UTF-8: {:?}", input_file))
+            .with_context(|| format!("Failed to convert filename to string: {:?}", input_file))?
+            .to_string();
+
+        output
+            .report
+            .set_title(&format!("Building packer {} ...", input_file.display()));
+
+        let packer = packer_factory(
+            output.clone(),
+            input_file,
+            input_name.clone(),
+            config,
+            hashes_file.clone(),
+            sync_point_secs,
+        )
+        .with_context(|| format!("Failed to create packer for file: {}", input_file.display()))?;
+
+        output
+            .report
+            .set_title(&format!("Packing {} ...", input_file.display()));
+        let (_slab_id, archive) = packer
+            .pack(
+                archive_dir,
+                hashes_file.clone(),
+                data_archive_opt,
+                &mut splitter,
+                is_last_file,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to pack file: {} (name: {})",
+                    input_file.display(),
+                    input_name
+                )
+            })?;
+        data_archive_opt = Some(archive);
+    }
+
+    Ok(data_archive_opt)
 }
 
 //-----------------------------------------

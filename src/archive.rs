@@ -329,8 +329,23 @@ impl<'a, S: SlabStorage> Data<'a, S> {
         self.data_file.get_nr_slabs()
     }
 
-    // Sync all archive files without closing them
-    pub fn sync_checkpoint(&mut self) -> Result<()> {
+    // Sync all archive files without closing them (does NOT write checkpoint file for MultiFile)
+    // This is the internal implementation used by both the generic Drop and MultiFile::sync_checkpoint
+    pub(crate) fn sync_internal(&mut self) -> Result<()> {
+        // Check if completing the slab will cross a file boundary
+        // For SlabFile, will_cross_boundary_on_next_write() always returns false
+        // For MultiFile, we need to handle the boundary before completing the slab
+        if self.data_file.will_cross_boundary_on_next_write() {
+            // Sync archive state for the boundary crossing
+            self.sync_for_file_boundary()?;
+
+            // Cross the boundary (no-op for SlabFile, creates new file for MultiFile)
+            // Note: For MultiFile, this should ideally create a checkpoint first,
+            // but we can't do that here without access to MultiFile-specific methods.
+            // The caller (drop or explicit sync) should handle this properly.
+            self.data_file.cross_file_boundary()?;
+        }
+
         // Complete current data slab if needed
         self.complete_data_slab()
             .with_context(|| "Failed to complete data slab during sync checkpoint")?;
@@ -385,8 +400,8 @@ impl<'a, S: SlabStorage> Data<'a, S> {
     }
 
     fn sync_and_close(&mut self) {
-        self.sync_checkpoint()
-            .expect("Data.drop: sync_checkpoint error!");
+        self.sync_internal()
+            .expect("Data.drop: sync_internal error!");
         let mut hashes_file = self.hashes_file.lock().unwrap();
         hashes_file
             .close()
@@ -414,6 +429,25 @@ pub fn calculate_slab_capacity(block_size: usize, hash_cache_size_meg: usize) ->
 
 // Specialized methods for Data<MultiFile>
 impl<'a> Data<'a, MultiFile> {
+    /// Sync all archive files and write checkpoint
+    ///
+    /// This method syncs all archive state and writes a checkpoint file
+    /// that can be used for crash recovery. The checkpoint captures the
+    /// current write file ID to ensure recovery knows which files are valid.
+    pub fn sync_checkpoint(&mut self) -> Result<()> {
+        // First do the standard sync (complete slab, sync files, write cuckoo filter)
+        self.sync_internal()?;
+
+        // Now write the checkpoint file with the current write file ID
+        let data_slab_file_id = self.data_file.get_current_write_file_id();
+        let checkpoint_path = self.archive_dir.join(crate::recovery::check_point_file());
+        let checkpoint =
+            crate::recovery::create_checkpoint_from_files(&self.archive_dir, data_slab_file_id)?;
+        checkpoint.write(&checkpoint_path)?;
+
+        Ok(())
+    }
+
     /// Check if the next slab write will cross a file boundary
     pub fn will_cross_file_boundary(&self) -> bool {
         self.data_file.will_cross_boundary_on_next_write()
@@ -502,6 +536,11 @@ impl<'a> Data<'a, MultiFile> {
             }
             result => result,
         }
+    }
+
+    /// Get the current write file ID from the underlying MultiFile storage
+    pub fn get_current_write_file_id(&self) -> u32 {
+        self.data_file.get_current_write_file_id()
     }
 }
 

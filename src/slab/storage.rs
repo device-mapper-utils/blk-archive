@@ -30,6 +30,27 @@ pub trait SlabStorage {
 
     /// Get the total file size in bytes
     fn get_file_size(&self) -> u64;
+
+    /// Check if the next write_slab() call will cross a file boundary
+    ///
+    /// For single-file storage (SlabFile), this always returns false.
+    /// For multi-file storage (MultiFile), this returns true when the next
+    /// write would create a new file.
+    fn will_cross_boundary_on_next_write(&self) -> bool {
+        false
+    }
+
+    /// Handle file boundary crossing with proper synchronization
+    ///
+    /// For single-file storage (SlabFile), this is a no-op.
+    /// For multi-file storage (MultiFile), this closes the current file
+    /// and creates a new one.
+    ///
+    /// IMPORTANT: The caller must sync all related state and create checkpoints
+    /// BEFORE calling this method to ensure crash consistency.
+    fn cross_file_boundary(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
