@@ -119,7 +119,7 @@ pub fn build_cli() -> clap::Command {
                 .about("packs a stream into the archive")
                 .arg(
                     Arg::new("INPUT")
-                        .help("Specify one or more devices or files to archive")
+                        .help("Specify one or more devices or files to archive (only one INPUT allowed with --delta-stream/--delta-device)")
                         .required(true)
                         .value_name("INPUT")
                         .num_args(1..)
@@ -129,23 +129,25 @@ pub fn build_cli() -> clap::Command {
                 .arg(
                     Arg::new("DELTA_STREAM")
                         .help(
-                            "Specify the stream that contains an older version of this thin device",
+                            "Specify the stream that contains an older version of this thin device (requires --delta-device, only single INPUT allowed)",
                         )
                         .required(false)
                         .long("delta-stream")
                         .value_name("DELTA_STREAM")
                         .num_args(1)
+                        .requires("DELTA_DEVICE")
                         .help_heading("Optional Options"),
                 )
                 .arg(
                     Arg::new("DELTA_DEVICE")
                         .help(
-                            "Specify the device that contains an older version of this thin device",
+                            "Specify the device that contains an older version of this thin device (requires --delta-stream, only single INPUT allowed)",
                         )
                         .required(false)
                         .long("delta-device")
                         .value_name("DELTA_DEVICE")
                         .num_args(1)
+                        .requires("DELTA_STREAM")
                         .help_heading("Optional Options"),
                 )
                 .arg(data_cache_size.clone())
