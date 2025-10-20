@@ -79,8 +79,15 @@ fn build_cuckoo_from_hashes(
         let mut hashes_file = hashes_slab.lock().unwrap();
 
         for s in 0..hashes_file.get_nr_slabs() {
-            let buf = hashes_file.read(s as u32)?;
-            let hi = ByHash::new(buf)?;
+            let buf = hashes_file.read(s as u32).with_context(|| {
+                format!("build_cuckoo_from_hashes:failed to read hashes slab {}", s)
+            })?;
+            let hi = ByHash::new(buf).with_context(|| {
+                format!(
+                    "build_cuckoo_from_hashes: failed to parse hash index for slab {}",
+                    s
+                )
+            })?;
 
             for i in 0..hi.len() {
                 let h = hi.get(i);
@@ -152,7 +159,9 @@ impl<'a, S: SlabStorage> Data<'a, S> {
     fn get_info(&mut self, slab: u32) -> Result<&ByIndex> {
         self.slabs.try_get_or_insert(slab, || {
             let mut hf = self.hashes_file.lock().unwrap();
-            let hashes = hf.read(slab)?;
+            let hashes = hf
+                .read(slab)
+                .with_context(|| format!("Failed to read hashes for slab {}", slab))?;
             ByIndex::new(hashes)
         })
     }
@@ -172,7 +181,9 @@ impl<'a, S: SlabStorage> Data<'a, S> {
 
         self.hashes.try_get_or_insert(slab, || {
             let mut hashes_file = self.hashes_file.lock().unwrap();
-            let buf = hashes_file.read(slab)?;
+            let buf = hashes_file
+                .read(slab)
+                .with_context(|| format!("get_hash_index: read error for slab idx {}", slab))?;
             ByHash::new(buf)
         })
     }
@@ -193,7 +204,12 @@ impl<'a, S: SlabStorage> Data<'a, S> {
             self.hashes.put(self.current_slab, index);
 
             let mut hashes_file = self.hashes_file.lock().unwrap();
-            hashes_file.write_slab(&self.hashes_buf)?;
+            hashes_file.write_slab(&self.hashes_buf).with_context(|| {
+                format!(
+                    "complete_data_slab: write error hashes slab idx {}",
+                    self.current_slab
+                )
+            })?;
             self.hashes_buf.clear();
             self.current_slab += 1;
             self.current_entries = 0;
@@ -364,11 +380,15 @@ impl<'a, S: SlabStorage> Data<'a, S> {
 
         // Write cuckoo filter
         let index_path = paths::index_path(&self.archive_dir);
-        self.seen.write(&index_path)?;
+        self.seen
+            .write(&index_path)
+            .with_context(|| format!("Failed to write cuckoo filter to {:?}", index_path))?;
 
         // Sync the directory that is holding the cuckoo filter
         // Note: The offsets file could be re-built if needed.
-        index_path.sync_parent()?;
+        index_path
+            .sync_parent()
+            .with_context(|| format!("Failed to sync parent directory of {:?}", index_path))?;
 
         Ok(())
     }
@@ -391,10 +411,14 @@ impl<'a, S: SlabStorage> Data<'a, S> {
 
         // Write cuckoo filter
         let index_path = paths::index_path(&self.archive_dir);
-        self.seen.write(&index_path)?;
+        self.seen
+            .write(&index_path)
+            .with_context(|| format!("Failed to write cuckoo filter to {:?}", index_path))?;
 
         // Sync the directory holding the cuckoo filter
-        index_path.sync_parent()?;
+        index_path
+            .sync_parent()
+            .with_context(|| format!("Failed to sync parent directory of {:?}", index_path))?;
 
         Ok(())
     }
@@ -443,7 +467,12 @@ impl<'a> Data<'a, MultiFile> {
         let checkpoint_path = self.archive_dir.join(crate::recovery::check_point_file());
         let checkpoint =
             crate::recovery::create_checkpoint_from_files(&self.archive_dir, data_slab_file_id)?;
-        checkpoint.write(&checkpoint_path)?;
+        checkpoint.write(&checkpoint_path).with_context(|| {
+            format!(
+                "MultiFile:sync_checkpoint: failed to write checkpoint to {:?}",
+                checkpoint_path
+            )
+        })?;
 
         Ok(())
     }
@@ -479,10 +508,17 @@ impl<'a> Data<'a, MultiFile> {
         let checkpoint_path = self.archive_dir.join(crate::recovery::check_point_file());
         let checkpoint =
             crate::recovery::create_checkpoint_from_files(&self.archive_dir, current_file_id)?;
-        checkpoint.write(&checkpoint_path)?;
+        checkpoint
+            .write(&checkpoint_path)
+            .with_context(|| format!("Failed to write checkpoint to {:?}", checkpoint_path))?;
 
         // Now it's safe to cross the boundary
-        self.data_file.cross_file_boundary()?;
+        self.data_file.cross_file_boundary().with_context(|| {
+            format!(
+                "Failed to cross file boundary:current file {:?}",
+                current_file_id
+            )
+        })?;
 
         Ok(())
     }
@@ -573,11 +609,26 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
         .as_ref()
         .join(crate::recovery::check_point_file());
     if RecoveryCheckpoint::exists(&checkpoint_path) {
-        let checkpoint = RecoveryCheckpoint::read(&checkpoint_path)?;
-        checkpoint.apply(archive_path.as_ref())?;
+        let checkpoint = RecoveryCheckpoint::read(&checkpoint_path).with_context(|| {
+            format!(
+                "flight_check: read error on checkpoint from {:?}",
+                checkpoint_path
+            )
+        })?;
+        checkpoint.apply(archive_path.as_ref()).with_context(|| {
+            format!(
+                "flight_check: error applying recovery checkpoint at {:?}",
+                archive_path.as_ref()
+            )
+        })?;
     }
 
-    let data_file = current_active_data_slab(&archive_path)?;
+    let data_file = current_active_data_slab(&archive_path).with_context(|| {
+        format!(
+            "flight_check: Failed to find active data slab {:?}",
+            archive_path.as_ref()
+        )
+    })?;
 
     let hashes_file = hashes_path(&archive_path);
     let data_path = data_file.as_ref();
@@ -622,11 +673,21 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
         get_or_regenerate_slab_offsets(hashes_path, &hashes_offsets_path)?;
 
     if data_regen {
-        data_offsets.write_offset_file(true)?;
+        data_offsets.write_offset_file(true).with_context(|| {
+            format!(
+                "flight_check:error writing regen data offsets for {:?}",
+                data_path
+            )
+        })?;
     }
 
     if hashes_regen {
-        hashes_offsets.write_offset_file(true)?;
+        hashes_offsets.write_offset_file(true).with_context(|| {
+            format!(
+                "flight_check:error writing regen hashes offsets for {:?}",
+                hashes_path
+            )
+        })?;
     }
 
     // Check if counts match bettween the data and hashes slab
@@ -636,19 +697,43 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
         drop(hashes_offsets);
 
         // Try regenerating both to be sure, regenerating index files is safe.
-        let mut data_offsets = crate::slab::regenerate_index(data_path, None)?;
-        let mut hashes_offsets = crate::slab::regenerate_index(hashes_path, None)?;
+        let mut data_offsets =
+            crate::slab::regenerate_index(data_path, None).with_context(|| {
+                format!(
+                    "flight_check: failed to regenerate data index for {:?}",
+                    data_path
+                )
+            })?;
+        let mut hashes_offsets =
+            crate::slab::regenerate_index(hashes_path, None).with_context(|| {
+                format!(
+                    "flignt_check: Failed to regenerate hashes index for {:?}",
+                    hashes_path
+                )
+            })?;
 
         let hashes_count = hashes_offsets.len();
 
-        data_offsets.write_offset_file(true)?;
-        hashes_offsets.write_offset_file(true)?;
+        data_offsets.write_offset_file(true).with_context(|| {
+            format!(
+                "flight_check: Failed to write data offsets file for {:?}",
+                data_path
+            )
+        })?;
+        hashes_offsets.write_offset_file(true).with_context(|| {
+            format!(
+                "flight_Check: Failed to write hashes offsets file for {:?}",
+                hashes_path
+            )
+        })?;
 
         // We need to compare the count of all slabs across all the data files to the hashes file
-        //
-        // TODO: We may also have to go back through the slab files fixing up the index files.
-        // because if the error exists in anyone of them, our numbers won't match
-        let data_mf = MultiFile::open_for_read(&archive_path, 0)?;
+        let data_mf = MultiFile::open_for_read(&archive_path, 0).with_context(|| {
+            format!(
+                "flight_check: failed to open multi-file for read at {:?}",
+                archive_path.as_ref()
+            )
+        })?;
         let data_count = data_mf.get_nr_slabs();
         drop(data_mf);
 
@@ -656,14 +741,24 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
             // if we get here, we need to walk all the data slab files and regen all of the index
             // files.  When that is done we will fetch the number of data slabs and if it doesn't
             // match the hash slab count, the archive is in a bad state.
-            MultiFile::fix_data_file_slab_indexes(&archive_path)?;
+            MultiFile::fix_data_file_slab_indexes(&archive_path).with_context(|| {
+                format!(
+                    "flight_check: failed to fix data file slab indexes at {:?}",
+                    archive_path.as_ref()
+                )
+            })?;
 
-            let data_mf = MultiFile::open_for_read(&archive_path, 0)?;
+            let data_mf = MultiFile::open_for_read(&archive_path, 0).with_context(|| {
+                format!(
+                    "flight_check: Failed to open multi-file for read at {:?}",
+                    archive_path.as_ref()
+                )
+            })?;
             let data_count = data_mf.get_nr_slabs();
 
             if data_count as usize != hashes_count {
                 return Err(anyhow::anyhow!(
-                "Slab count mismatch after offsets for all slab files regenerated: data file has {} slabs, hashes file has {} slabs",
+                "flight_check: slab count mismatch after offsets for all slab files regenerated: data file has {} slabs, hashes file has {} slabs",
                 data_count,
                 hashes_count
             ));

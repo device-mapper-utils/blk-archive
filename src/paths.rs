@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -45,16 +45,29 @@ pub fn cleanup_temp_streams(streams_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let paths = fs::read_dir(streams_dir)?;
+    let paths = fs::read_dir(streams_dir).with_context(|| {
+        format!(
+            "cleanup_temp_streams:failed to read streams directory {:?}",
+            streams_dir
+        )
+    })?;
 
     for entry in paths {
-        let entry = entry?;
+        let entry = entry.with_context(|| {
+            format!(
+                "cleanup_temp_streams:failed to read directory entry in {:?}",
+                streams_dir
+            )
+        })?;
         let file_name = entry.file_name();
         let name = file_name.to_str().unwrap_or("");
 
         if name.starts_with(".tmp_") {
             if let Err(e) = fs::remove_dir_all(entry.path()) {
-                eprintln!("Warning: Failed to remove temp directory {}: {}", name, e);
+                eprintln!(
+                    "cleanup_temp_streams:: Warning: Failed to remove temp directory {}: {}",
+                    name, e
+                );
             }
         }
     }

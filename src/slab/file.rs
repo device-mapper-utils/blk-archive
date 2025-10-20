@@ -72,6 +72,7 @@ pub struct SlabFile<'a> {
     compressor: Option<CompressionService>,
     offsets_path: PathBuf,
     pending_index: u64,
+    slab_path: PathBuf,
 
     shared: Shared<'a>,
 
@@ -204,7 +205,13 @@ pub fn regenerate_index<'a, P: AsRef<Path>>(
         }
 
         let mut expected_csum: Hash64 = Hash64::default();
-        data.read_exact(&mut expected_csum)?;
+        data.read_exact(&mut expected_csum).with_context(|| {
+            format!(
+                "Failed to read checksum for slab {} in {}",
+                slab_index,
+                slab_name.to_string_lossy()
+            )
+        })?;
 
         if remaining < SLAB_HDR_LEN + len {
             return Err(anyhow!(
@@ -215,7 +222,14 @@ pub fn regenerate_index<'a, P: AsRef<Path>>(
         }
 
         let mut buf = vec![0; len as usize];
-        data.read_exact(&mut buf)?;
+        data.read_exact(&mut buf).with_context(|| {
+            format!(
+                "Failed to read slab {} data ({} bytes) from {}",
+                slab_index,
+                len,
+                slab_name.to_string_lossy()
+            )
+        })?;
 
         let actual_csum = hash_64(&buf);
         if actual_csum != expected_csum {
@@ -291,6 +305,7 @@ impl<'a> SlabFile<'a> {
         'a: 'static,
     {
         let offsets_path = offsets_path(&data_path);
+        let slab_path = data_path.as_ref().to_path_buf();
 
         let mut data = OpenOptions::new()
             .read(true)
@@ -338,6 +353,7 @@ impl<'a> SlabFile<'a> {
             compressor,
             offsets_path,
             pending_index: 0,
+            slab_path,
             shared,
             tx: Some(tx),
             tid: Some(tid),
@@ -354,6 +370,7 @@ impl<'a> SlabFile<'a> {
         'a: 'static,
     {
         let offsets_path = offsets_path(&data_path);
+        let slab_path = data_path.as_ref().to_path_buf();
 
         let mut data = OpenOptions::new()
             .read(true)
@@ -401,6 +418,7 @@ impl<'a> SlabFile<'a> {
             compressor,
             offsets_path,
             pending_index: nr_existing_slabs as u64, // Start from number of existing slabs
+            slab_path,
             shared,
             tx: Some(tx),
             tid: Some(tid),
@@ -413,6 +431,7 @@ impl<'a> SlabFile<'a> {
         cache_nr_entries: usize,
     ) -> Result<Self> {
         let offsets_path = offsets_path(&data_path);
+        let slab_path = data_path.as_ref().to_path_buf();
 
         let mut data = OpenOptions::new()
             .read(true)
@@ -446,6 +465,7 @@ impl<'a> SlabFile<'a> {
             compressor,
             offsets_path,
             pending_index: 0,
+            slab_path,
             shared,
             tx: None,
             tid: None,
@@ -529,7 +549,8 @@ impl<'a> SlabFile<'a> {
         let slab_idx = slab as usize;
         if slab_idx >= shared.offsets.len() {
             return Err(anyhow::anyhow!(
-                "Slab index {} out of bounds (have {} slabs committed to disk)",
+                "Slab {:?} index {} out of bounds (have {} slabs committed to disk)",
+                self.slab_path,
                 slab,
                 shared.offsets.len()
             ));
@@ -543,17 +564,31 @@ impl<'a> SlabFile<'a> {
 
         let magic = shared.data.read_u64::<LittleEndian>()?;
         let len = shared.data.read_u64::<LittleEndian>()?;
-        assert_eq!(magic, SLAB_MAGIC);
+
+        if magic != SLAB_MAGIC {
+            return Err(anyhow!(format!(
+                "While trying to read the slab {:?} index {} with len {} we got error a slab magic missmatch! expected = {:016x} actual {:016x}",
+                self.slab_path, slab, len, SLAB_MAGIC, magic
+            )));
+        }
 
         let mut expected_csum: Hash64 = Hash64::default();
-        shared.data.read_exact(&mut expected_csum)?;
+        shared
+            .data
+            .read_exact(&mut expected_csum)
+            .with_context(|| {
+                format!(
+                    "Failed to read checksum for slab {} in {:?}",
+                    slab, self.slab_path
+                )
+            })?;
 
         let mut buf = vec![0; len as usize];
         let slab_read_result = shared.data.read_exact(&mut buf);
         if let Err(e) = slab_read_result {
             return Err(anyhow!(format!(
-                "While trying to read the slab {} with len {} we got error '{:#}'",
-                slab, len, e
+                "While trying to read the slab {:?} index {} with len {} we got error '{:#}'",
+                self.slab_path, slab, len, e
             )));
         }
 

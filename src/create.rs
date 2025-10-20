@@ -20,7 +20,8 @@ fn create_sub_dir(root: &Path, sub: &str) -> Result<()> {
     let mut p = PathBuf::new();
     p.push(root);
     p.push(sub);
-    fs::create_dir(p)?;
+    fs::create_dir(&p)
+        .with_context(|| format!("Failed to create subdirectory '{}' in {:?}", sub, root))?;
     Ok(())
 }
 
@@ -39,7 +40,8 @@ fn write_config(
         .write(true)
         .create(true)
         .truncate(true)
-        .open(p)?;
+        .open(&p)
+        .with_context(|| format!("Failed to create config file at {:?}", p))?;
 
     let config = Config {
         block_size,
@@ -48,7 +50,8 @@ fn write_config(
         data_cache_size_meg,
     };
 
-    write!(output, "{}", &serde_yaml_ng::to_string(&config).unwrap())?;
+    write!(output, "{}", &serde_yaml_ng::to_string(&config).unwrap())
+        .with_context(|| format!("Failed to write config to {:?}", p))?;
     Ok(())
 }
 
@@ -109,25 +112,39 @@ fn create(
 
     // Create empty data and hash slab files
     let mut data_file = MultiFile::create(archive_dir, 1, data_compression, 1)?;
-    data_file.close()?;
+    data_file
+        .close()
+        .with_context(|| format!("Failed to close data file in {:?}", archive_dir))?;
 
-    let mut hashes_file = SlabFileBuilder::create(hashes_path(archive_dir))
+    let hashes_path = hashes_path(archive_dir);
+    let mut hashes_file = SlabFileBuilder::create(&hashes_path)
         .queue_depth(1)
         .compressed(false)
         .build()?;
-    hashes_file.close()?;
+    hashes_file
+        .close()
+        .with_context(|| format!("Failed to close hashes file at {:?}", hashes_path))?;
 
     // Write empty index
+    let index_path = paths::index_path(archive_dir);
     let index = CuckooFilter::with_capacity(cuckoo_filter::INITIAL_SIZE);
-    index.write(paths::index_path(archive_dir))?;
+    index
+        .write(&index_path)
+        .with_context(|| format!("Failed to write initial index to {:?}", index_path))?;
 
     // Sync all files to disk before creating checkpoint
-    recovery::sync_archive(archive_dir, 0)?;
+    recovery::sync_archive(archive_dir, 0)
+        .with_context(|| format!("Failed to sync archive at {:?}", archive_dir))?;
 
     // Create initial recovery checkpoint
     let checkpoint_path = archive_dir.join(recovery::check_point_file());
     let checkpoint = recovery::create_checkpoint_from_files(archive_dir, 0)?;
-    checkpoint.write(checkpoint_path)?;
+    checkpoint.write(&checkpoint_path).with_context(|| {
+        format!(
+            "Failed to write initial checkpoint to {:?}",
+            checkpoint_path
+        )
+    })?;
 
     Ok(())
 }

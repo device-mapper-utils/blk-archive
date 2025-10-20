@@ -74,10 +74,23 @@ impl SlabOffsets<'_> {
             return Err(anyhow!("offset file too small (< 24 B) to contain footer"));
         }
 
+        let pathbuf: PathBuf = p.as_ref().to_path_buf();
+
         // Read last 24 bytes: FOOT_MAGIC | COUNT | CRC64
         let mut footer = [0u8; 24];
-        (&f).seek(SeekFrom::End(-(SLAB_OFFSET_FOOTER_SIZE as i64)))?;
-        (&f).read_exact(&mut footer)?;
+        (&f).seek(SeekFrom::End(-(SLAB_OFFSET_FOOTER_SIZE as i64)))
+            .with_context(|| {
+                format!(
+                    "SlabOffsets:seek to end -24 on slab index footer for file {:?}",
+                    pathbuf
+                )
+            })?;
+        (&f).read_exact(&mut footer).with_context(|| {
+            format!(
+                "SlabOffsets:read_exact on slab index footer for file {:?}",
+                pathbuf
+            )
+        })?;
 
         let magic = u64::from_le_bytes(footer[0..8].try_into().unwrap());
         let count = u64::from_le_bytes(footer[8..16].try_into().unwrap());
@@ -85,7 +98,9 @@ impl SlabOffsets<'_> {
 
         // Verify magic
         if magic != FOOT_MAGIC_CRC64 {
-            return Err(anyhow!("unrecognized footer magic 0x{magic:016x}"));
+            return Err(anyhow!(
+                "SlabOffsets::unrecognized footer magic 0x{magic:016x}"
+            ));
         }
 
         let data_end = len - SLAB_OFFSET_FOOTER_SIZE;
@@ -93,10 +108,10 @@ impl SlabOffsets<'_> {
 
         let required = count
             .checked_mul(8)
-            .ok_or_else(|| anyhow!("COUNT overflow"))?;
+            .ok_or_else(|| anyhow!("SlabOffsets::COUNT overflow"))?;
         if required != data_end {
             return Err(anyhow!(
-                "footer COUNT mismatch: expected data {} B, found {} B before footer",
+                "SlabOffsets:: footer COUNT mismatch: expected data {} B, found {} B before footer",
                 required,
                 data_end
             ));
@@ -113,10 +128,14 @@ impl SlabOffsets<'_> {
         } else {
             // Small file: load into RAM
             let mut offsets = Vec::with_capacity(count as usize);
-            (&f).seek(SeekFrom::Start(0))?;
-            for _ in 0..count {
+            (&f).seek(SeekFrom::Start(0)).with_context(|| {
+                format!("SlabOffsets:: Failed to seek to start of {:?}", pathbuf)
+            })?;
+            for i in 0..count {
                 let mut buf = [0u8; 8];
-                (&f).read_exact(&mut buf)?;
+                (&f).read_exact(&mut buf).with_context(|| {
+                    format!("SlabOffsets:Failed to read offset {} from {:?}", i, pathbuf)
+                })?;
                 offsets.push(u64::from_le_bytes(buf));
             }
             drop(f);
@@ -237,12 +256,19 @@ impl SlabOffsets<'_> {
             self.existing_offsets.clear();
         } else {
             // Small file: load into RAM
-            let f_ro = OpenOptions::new().read(true).open(&self.path)?;
+            let f_ro = OpenOptions::new()
+                .read(true)
+                .open(&self.path)
+                .with_context(|| format!("Failed to open {:?} for reading", self.path))?;
             let mut offsets = Vec::with_capacity(total_count);
-            (&f_ro).seek(SeekFrom::Start(0))?;
-            for _ in 0..total_count {
+            (&f_ro)
+                .seek(SeekFrom::Start(0))
+                .with_context(|| format!("Failed to seek to start of {:?}", self.path))?;
+            for i in 0..total_count {
                 let mut buf = [0u8; 8];
-                (&f_ro).read_exact(&mut buf)?;
+                (&f_ro)
+                    .read_exact(&mut buf)
+                    .with_context(|| format!("Failed to read offset {} from {:?}", i, self.path))?;
                 offsets.push(u64::from_le_bytes(buf));
             }
             drop(f_ro);
@@ -297,8 +323,18 @@ pub fn validate_slab_offsets_file<P: AsRef<Path>>(p: P, verify_crc: bool) -> Res
 
     // Read 24-byte footer.
     let mut tail = [0u8; 24];
-    (&f).seek(SeekFrom::End(-24))?;
-    (&f).read_exact(&mut tail)?;
+    (&f).seek(SeekFrom::End(-24)).with_context(|| {
+        format!(
+            "validate_slab_offsets_file:failed to seek to footer in {:?}",
+            path
+        )
+    })?;
+    (&f).read_exact(&mut tail).with_context(|| {
+        format!(
+            "validate_slab_offsets_file:failed to read footer from {:?}",
+            path
+        )
+    })?;
 
     let magic = u64::from_le_bytes(tail[0..8].try_into().unwrap());
     let count = u64::from_le_bytes(tail[8..16].try_into().unwrap());
@@ -327,10 +363,20 @@ pub fn validate_slab_offsets_file<P: AsRef<Path>>(p: P, verify_crc: bool) -> Res
     let mut crc = SLAB_OFFSET_CRC.digest();
     let mut buf = vec![0u8; 1 << 20]; // 1 MiB buffer
     let mut remaining = data_end;
-    (&f).seek(SeekFrom::Start(0))?;
+    (&f).seek(SeekFrom::Start(0)).with_context(|| {
+        format!(
+            "validate_slab_offsets_file:failed to seek to start of {:?} for CRC verification",
+            path
+        )
+    })?;
     while remaining > 0 {
         let to_read = std::cmp::min(remaining as usize, buf.len());
-        (&f).read_exact(&mut buf[..to_read])?;
+        (&f).read_exact(&mut buf[..to_read]).with_context(|| {
+            format!(
+                "validate_slab_offsets_file:failed to read {} bytes from {:?} for CRC verification",
+                to_read, path
+            )
+        })?;
         crc.update(&buf[..to_read]);
         remaining -= to_read as u64;
     }
