@@ -715,6 +715,10 @@ pub fn canonicalize_readable_regular_or_block(path_str: String) -> Result<PathBu
     Ok(canon)
 }
 
+fn is_subpath(parent: &Path, child: &Path) -> bool {
+    child.starts_with(parent)
+}
+
 pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     let archive_dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap()).canonicalize()?;
     let input_files: Vec<&String> = matches.get_many::<String>("INPUT").unwrap().collect();
@@ -755,6 +759,12 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
         }
 
         let input_file = result.unwrap();
+
+        // Both of these paths have already been canonicalized
+        if is_subpath(&archive_dir, &input_file) {
+            eprintln!("refusing to pack a file in the archive {:?}", input_file);
+            continue;
+        }
 
         if delta_args.is_some() {
             delta_block_devs.push(input_file);
