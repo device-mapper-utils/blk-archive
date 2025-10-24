@@ -160,8 +160,7 @@ pub fn current_active_data_slab<P: AsRef<std::path::Path>>(base_path: P) -> Resu
 }
 
 fn count_slabs_in_file(file_path: &Path) -> Result<u32> {
-    let slab_file = SlabFile::open_for_read(file_path, 1)?;
-    Ok(slab_file.get_nr_slabs() as u32)
+    number_of_slabs(file_path)
 }
 
 //------------------------------------------------

@@ -140,6 +140,20 @@ fn writer_(shared: &Shared, rx: Receiver<SlabData>, start_index: u64) -> Result<
     Ok(())
 }
 
+// Retrieve the number of slabs in a slab file by using the index file count
+// This should not be considered an absolute truth as the index file may not match the
+// data slab.  It's a quick check to be used when we're doing simple checks when we start up.
+pub fn number_of_slabs<P: AsRef<Path>>(data_slab: P) -> Result<u32> {
+    let slab_offsets_name = offsets_path(&data_slab);
+    let (valid, count, context) = validate_slab_offsets_file(&slab_offsets_name, false);
+
+    if valid {
+        Ok(count)
+    } else {
+        Err(anyhow!(context.unwrap()))
+    }
+}
+
 fn writer(shared: &Shared, rx: Receiver<SlabData>, start_index: u64) {
     // FIXME: pass on error
     writer_(shared, rx, start_index).expect("write of slab failed");
