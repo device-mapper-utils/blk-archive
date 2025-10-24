@@ -236,12 +236,42 @@ impl RecoveryCheckpoint {
 
         // Truncate hashes file (will fail if missing)
         let hashes_path = hashes_path(archive_dir_ref);
-        Self::truncate_file(&hashes_path, self.hashes_file_size)?;
+        let hashes_truncated = Self::truncate_file(&hashes_path, self.hashes_file_size)?;
+
+        // If hashes file was truncated, regenerate its index to reflect correct slab count
+        if hashes_truncated {
+            let mut hashes_index =
+                crate::slab::regenerate_index(&hashes_path).with_context(|| {
+                    format!("Failed to regenerate hashes index for {:?}", hashes_path)
+                })?;
+            hashes_index.write_offset_file(true).with_context(|| {
+                format!("Failed to write hashes offset file for {:?}", hashes_path)
+            })?;
+            drop(hashes_index);
+        }
 
         // Truncate the current write file (will fail if missing)
         let current_file_path =
             crate::slab::multi_file::file_id_to_path(archive_dir_ref, self.data_slab_file_id);
-        Self::truncate_file(&current_file_path, self.data_slab_file_size)?;
+        let data_truncated = Self::truncate_file(&current_file_path, self.data_slab_file_size)?;
+
+        // If data file was truncated, regenerate its index to reflect correct slab count
+        if data_truncated {
+            let mut data_index =
+                crate::slab::regenerate_index(&current_file_path).with_context(|| {
+                    format!(
+                        "Failed to regenerate data index for {:?}",
+                        current_file_path
+                    )
+                })?;
+            data_index.write_offset_file(true).with_context(|| {
+                format!(
+                    "Failed to write data offset file for {:?}",
+                    current_file_path
+                )
+            })?;
+            drop(data_index);
+        }
 
         // Note: Older files (file_id < data_slab_file_id) are fully written and don't
         // need truncation (well, that is our expectation :-)
@@ -273,7 +303,8 @@ impl RecoveryCheckpoint {
     /// Truncate a file to the specified size
     ///
     /// Fails if the file is smaller than the target size, as this indicates corruption.
-    fn truncate_file<P: AsRef<Path>>(path: P, size: u64) -> Result<()> {
+    /// Returns true if the file was actually truncated (size was reduced), false otherwise.
+    fn truncate_file<P: AsRef<Path>>(path: P, size: u64) -> Result<bool> {
         let path = path.as_ref();
         let file = OpenOptions::new()
             .write(true)
@@ -292,11 +323,16 @@ impl RecoveryCheckpoint {
             ));
         }
 
-        file.set_len(size)
-            .with_context(|| format!("Failed to truncate file {:?} to size {}", path, size))?;
+        let was_truncated = current_size > size;
 
-        file.sync_all()?;
-        Ok(())
+        if was_truncated {
+            file.set_len(size)
+                .with_context(|| format!("Failed to truncate file {:?} to size {}", path, size))?;
+
+            file.sync_all()?;
+        }
+
+        Ok(was_truncated)
     }
 
     /// Delete a recovery checkpoint file (optional utility)
