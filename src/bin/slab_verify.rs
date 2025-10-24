@@ -313,31 +313,29 @@ fn verify_slabs(slab_path: &Path, verbose: bool, max_slabs: usize) -> Result<Vec
 }
 
 fn verify_offsets_file(offsets_path: &Path, verify_crc: bool) -> Result<usize> {
-    let is_valid = validate_slab_offsets_file(offsets_path, verify_crc)?;
+    let (isvalid, count, error) = validate_slab_offsets_file(offsets_path, verify_crc);
 
-    if !is_valid {
-        return Err(anyhow!("Offsets file validation failed"));
+    if !isvalid {
+        return Err(anyhow!(
+            "Offsets file validation failed: reason: '{}'",
+            error.unwrap_or_default()
+        ));
     }
 
-    // Get count from file
-    let mut f = OpenOptions::new()
+    // Get file size for display
+    let len = match OpenOptions::new()
         .read(true)
         .write(false)
-        .open(offsets_path)?;
+        .open(offsets_path)
+    {
+        Ok(f) => f.metadata().map(|m| m.len()).unwrap_or(0),
+        Err(_) => 0,
+    };
 
-    let len = f.metadata()?.len();
-
-    if len == 0 {
+    if count == 0 {
         println!("✓ Offsets file valid (empty)");
         return Ok(0);
     }
-
-    // Read footer to get count
-    f.seek(SeekFrom::End(-24))?;
-    let mut footer = [0u8; 24];
-    f.read_exact(&mut footer)?;
-
-    let count = u64::from_le_bytes(footer[8..16].try_into().unwrap());
 
     println!("✓ Offsets file valid");
     println!("  Entry count: {}", count);

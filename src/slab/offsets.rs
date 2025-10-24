@@ -336,89 +336,148 @@ impl Drop for SlabOffsets<'_> {
     }
 }
 
-pub fn validate_slab_offsets_file<P: AsRef<Path>>(p: P, verify_crc: bool) -> Result<bool> {
+/// Validate a slab-offsets file.
+/// Returns: (is_valid, count, error_context)
+///
+/// - If `verify_crc` is false: only structural checks are performed.
+/// - If `verify_crc` is true: structural checks + CRC64 over [0 .. len-24).
+/// - Empty file is considered a valid empty table: (true, 0, None).
+pub fn validate_slab_offsets_file<P: AsRef<Path>>(
+    p: P,
+    verify_crc: bool,
+) -> (bool, u32, Option<String>) {
     let path = p.as_ref();
-    let f = OpenOptions::new()
+
+    // Open read-only without creating.
+    let f = match OpenOptions::new()
         .read(true)
         .write(false)
         .create(false)
         .open(path)
-        .with_context(|| format!("open {:?}", path))?;
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return (false, 0, Some(format!("open {:?}: {}", path, e)));
+        }
+    };
 
-    let len = f.metadata()?.len();
+    let len = match f.metadata() {
+        Ok(md) => md.len(),
+        Err(e) => {
+            return (false, 0, Some(format!("metadata {:?}: {}", path, e)));
+        }
+    };
 
     // Empty file is considered a valid empty table.
     if len == 0 {
-        return Ok(true);
+        return (true, 0, None);
     }
 
     // Must be at least big enough to hold FOOT_MAGIC + COUNT + CRC64.
     if len < 24 {
-        return Ok(false);
+        return (
+            false,
+            0,
+            Some(format!(
+                "file too small (<24 bytes): len={} for {:?}",
+                len, path
+            )),
+        );
     }
 
     // Read 24-byte footer.
+    let mut f = f; // make mutable
+    if let Err(e) = f.seek(SeekFrom::End(-24)) {
+        return (false, 0, Some(format!("seek footer {:?}: {}", path, e)));
+    }
     let mut tail = [0u8; 24];
-    (&f).seek(SeekFrom::End(-24)).with_context(|| {
-        format!(
-            "validate_slab_offsets_file:failed to seek to footer in {:?}",
-            path
-        )
-    })?;
-    (&f).read_exact(&mut tail).with_context(|| {
-        format!(
-            "validate_slab_offsets_file:failed to read footer from {:?}",
-            path
-        )
-    })?;
+    if let Err(e) = f.read_exact(&mut tail) {
+        return (false, 0, Some(format!("read footer {:?}: {}", path, e)));
+    }
 
-    let magic = u64::from_le_bytes(tail[0..8].try_into().unwrap());
-    let count = u64::from_le_bytes(tail[8..16].try_into().unwrap());
-    let crc_stored = u64::from_le_bytes(tail[16..24].try_into().unwrap());
+    let magic = match <[u8; 8]>::try_from(&tail[0..8]) {
+        Ok(a) => u64::from_le_bytes(a),
+        Err(_) => return (false, 0, Some("footer magic slice parse failed".into())),
+    };
+    let count = match <[u8; 8]>::try_from(&tail[8..16]) {
+        Ok(a) => u64::from_le_bytes(a),
+        Err(_) => return (false, 0, Some("footer count slice parse failed".into())),
+    };
+    let crc_stored = match <[u8; 8]>::try_from(&tail[16..24]) {
+        Ok(a) => u64::from_le_bytes(a),
+        Err(_) => return (false, 0, Some("footer CRC slice parse failed".into())),
+    };
 
     if magic != FOOT_MAGIC_CRC64 {
-        return Ok(false);
+        return (
+            false,
+            0,
+            Some(format!("bad footer magic: got=0x{:016x}", magic)),
+        );
     }
 
     // Data region length must equal count * 8 bytes.
     let data_end = len - 24;
     let required = match count.checked_mul(8) {
         Some(v) => v,
-        None => return Ok(false),
+        None => return (false, 0, Some("count * 8 overflow".into())),
     };
     if required != data_end {
-        return Ok(false);
+        return (
+            false,
+            0,
+            Some(format!(
+                "size/count mismatch: required={} (count*8) != data_end={} (len-24)",
+                required, data_end
+            )),
+        );
     }
 
     if !verify_crc {
         // Structural checks passed.
-        return Ok(true);
+        return (true, count as u32, None);
     }
 
     // Recompute CRC64 over the data region [0 .. data_end).
     let mut crc = SLAB_OFFSET_CRC.digest();
     let mut buf = vec![0u8; 1 << 20]; // 1 MiB buffer
+    if let Err(e) = f.seek(SeekFrom::Start(0)) {
+        return (
+            false,
+            0,
+            Some(format!("seek start for CRC {:?}: {}", path, e)),
+        );
+    }
     let mut remaining = data_end;
-    (&f).seek(SeekFrom::Start(0)).with_context(|| {
-        format!(
-            "validate_slab_offsets_file:failed to seek to start of {:?} for CRC verification",
-            path
-        )
-    })?;
     while remaining > 0 {
         let to_read = std::cmp::min(remaining as usize, buf.len());
-        (&f).read_exact(&mut buf[..to_read]).with_context(|| {
-            format!(
-                "validate_slab_offsets_file:failed to read {} bytes from {:?} for CRC verification",
-                to_read, path
-            )
-        })?;
+        if let Err(e) = f.read_exact(&mut buf[..to_read]) {
+            return (
+                false,
+                0,
+                Some(format!(
+                    "read {} bytes for CRC {:?} failed: {} (remaining={})",
+                    to_read, path, e, remaining
+                )),
+            );
+        }
         crc.update(&buf[..to_read]);
         remaining -= to_read as u64;
     }
     let crc_computed = crc.finalize();
 
-    Ok(crc_computed == crc_stored)
+    if crc_computed == crc_stored {
+        (true, count as u32, None)
+    } else {
+        (
+            false,
+            0,
+            Some(format!(
+                "CRC mismatch: computed=0x{:016x}, stored=0x{:016x}",
+                crc_computed, crc_stored
+            )),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -609,9 +668,11 @@ mod tests {
 
         drop(result.unwrap());
 
-        let verifies = validate_slab_offsets_file(offsets_path, true).unwrap();
+        let verifies = validate_slab_offsets_file(offsets_path, true);
         // This should return false
-        assert_ne!(verifies, true);
+        assert_ne!(verifies.0, true);
+        assert_eq!(verifies.1, 0);
+        assert!(verifies.2.is_some());
     }
 
     /// Compare two files byte-for-byte.
