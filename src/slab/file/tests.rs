@@ -1,10 +1,63 @@
+use super::regenerate_index;
 use super::*;
 use anyhow::{ensure, Result};
 use std::time::Duration;
 use tempfile::*;
 
+use crate::archive::SLAB_SIZE_TARGET;
+use crate::hash::{hash_64, Hash64};
+use crate::slab::file::{FILE_MAGIC, FORMAT_VERSION, SLAB_FILE_HDR_LEN, SLAB_HDR_LEN, SLAB_MAGIC};
 use crate::slab::SlabFileBuilder;
+use byteorder::{LittleEndian, WriteBytesExt};
+use std::fs::{File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
+use std::path::PathBuf;
 
+//-----------------------------------------
+// Helper functions
+//-----------------------------------------
+
+fn create_file(path: &PathBuf) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+fn write_valid_header(f: &mut File) -> std::io::Result<()> {
+    f.write_u64::<LittleEndian>(FILE_MAGIC)?;
+    f.write_u32::<LittleEndian>(FORMAT_VERSION)?;
+    f.write_u32::<LittleEndian>(0)?;
+    Ok(())
+}
+
+fn write_slab(f: &mut File, payload: &[u8]) -> std::io::Result<()> {
+    f.write_u64::<LittleEndian>(SLAB_MAGIC)?;
+    f.write_u64::<LittleEndian>(payload.len() as u64)?;
+    let csum: Hash64 = hash_64(payload);
+    f.write_all(&csum)?;
+    f.write_all(payload)?;
+    Ok(())
+}
+
+fn pad_bytes(f: &mut File, n: usize) -> std::io::Result<()> {
+    let zeros = vec![0u8; n];
+    f.write_all(&zeros)
+}
+
+fn create_trunc_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+//-----------------------------------------
+// Tests
 //-----------------------------------------
 
 // ensure the writer could handle unordered writes from the compressors
@@ -102,3 +155,191 @@ fn sync_all_no_writes() -> Result<()> {
 }
 
 //-----------------------------------------
+#[test]
+fn too_small_for_header_errors() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("tiny.slab");
+
+    // Create file smaller than SLAB_FILE_HDR_LEN
+    let mut f = create_file(&path).unwrap();
+    pad_bytes(&mut f, (SLAB_FILE_HDR_LEN as usize).saturating_sub(1)).unwrap();
+
+    let res = regenerate_index(&path);
+    assert!(res.is_err(), "expected error for file smaller than header");
+}
+
+#[test]
+fn empty_archive_ok() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("empty.slab");
+
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+    f.flush().unwrap();
+
+    let res = regenerate_index(&path);
+    assert!(res.is_ok(), "empty archive (header only) should be OK");
+    assert_eq!(res.unwrap().len(), 0);
+}
+
+#[test]
+fn single_slab_ok() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("single-ok.slab");
+
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+    write_slab(&mut f, b"hello world").unwrap();
+    f.flush().unwrap();
+
+    let res = regenerate_index(&path);
+    assert!(res.is_ok(), "single valid slab should parse");
+    assert_eq!(res.unwrap().len(), 1);
+}
+
+#[test]
+fn multiple_slabs_ok() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("multi-ok.slab");
+
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+    write_slab(&mut f, b"slab-0").unwrap();
+    write_slab(&mut f, b"slab-1-longer").unwrap();
+    write_slab(&mut f, &[42u8; 1024]).unwrap();
+    f.flush().unwrap();
+
+    let res = regenerate_index(&path);
+    assert!(res.is_ok(), "multiple valid slabs should parse");
+    assert_eq!(res.unwrap().len(), 3);
+}
+
+#[test]
+fn bad_magic_errors() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("bad-magic.slab");
+
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    // Write a bad magic followed by a minimal valid-looking header/payload
+    f.write_u64::<LittleEndian>(0xDEAD_BEEF_DEAD_BEEFu64)
+        .unwrap();
+    f.write_u64::<LittleEndian>(5u64).unwrap();
+    let bogus: Hash64 = Hash64::default();
+    f.write_all(&bogus).unwrap();
+    f.write_all(&[0u8; 5]).unwrap();
+    f.flush().unwrap();
+
+    let err = regenerate_index(&path).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("magic incorrect"),
+        "expected magic error, got: {msg}"
+    );
+}
+
+#[test]
+fn excessive_length_errors() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("excess-len.slab");
+
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    // Write header with slab_len > SLAB_SIZE_TARGET * 2
+    let len = (SLAB_SIZE_TARGET as u64) * 2 + 1;
+    f.write_u64::<LittleEndian>(SLAB_MAGIC).unwrap();
+    f.write_u64::<LittleEndian>(len).unwrap();
+    let bogus: Hash64 = Hash64::default();
+    f.write_all(&bogus).unwrap();
+    // Don't need to write payload; function should reject length before reading.
+    f.flush().unwrap();
+
+    let err = regenerate_index(&path).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("length too large"),
+        "expected length too large error, got: {msg}"
+    );
+}
+
+#[test]
+fn truncated_payload_errors() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("truncated-payload.slab");
+
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    // Write header that claims len = 100, but provide fewer than 100 bytes.
+    let claimed_len = 100u64;
+    f.write_u64::<LittleEndian>(SLAB_MAGIC).unwrap();
+    f.write_u64::<LittleEndian>(claimed_len).unwrap();
+
+    // Compute checksum for a 100-byte payload of zeros (just to have *some* checksum)
+    let full_payload = vec![0u8; claimed_len as usize];
+    let csum = hash_64(&full_payload);
+    f.write_all(&csum).unwrap();
+
+    // Actually write only 20 bytes -> truncated payload
+    f.write_all(&full_payload[..20]).unwrap();
+    f.flush().unwrap();
+
+    let err = regenerate_index(&path).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("truncated") || msg.contains("incomplete"),
+        "expected truncated payload error, got: {msg}"
+    );
+}
+
+#[test]
+fn checksum_mismatch_errors() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("bad-checksum.slab");
+
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    let payload = b"good-bytes";
+    f.write_u64::<LittleEndian>(SLAB_MAGIC).unwrap();
+    f.write_u64::<LittleEndian>(payload.len() as u64).unwrap();
+
+    // Put a wrong checksum
+    let wrong: Hash64 = Hash64::default();
+    f.write_all(&wrong).unwrap();
+
+    // Write the actual payload
+    f.write_all(payload).unwrap();
+    f.flush().unwrap();
+
+    let err = regenerate_index(&path).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("checksum"),
+        "expected checksum error, got: {msg}"
+    );
+}
+
+#[test]
+fn zero_length_slab_errors() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("zero-len.slab");
+
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    f.write_u64::<LittleEndian>(SLAB_MAGIC).unwrap();
+    f.write_u64::<LittleEndian>(0u64).unwrap(); // zero length
+    let bogus: Hash64 = Hash64::default();
+    f.write_all(&bogus).unwrap();
+    f.flush().unwrap();
+
+    let err = regenerate_index(&path).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("zero-length"),
+        "expected zero-length error, got: {msg}"
+    );
+}
