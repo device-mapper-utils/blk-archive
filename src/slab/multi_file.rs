@@ -285,15 +285,20 @@ impl MultiFile {
         })
     }
 
-    pub fn open_for_read<P: AsRef<Path>>(archive_dir: P, cache_nr_entries: usize) -> Result<Self> {
-        // Discover existing files
-        let (num_files, total_slabs) = discover_existing_files(&archive_dir)?;
-        if num_files == 0 {
+    pub fn total_number_slabs<P: AsRef<Path>>(archive_dir: P) -> Result<(u32, u32)> {
+        let numbers = discover_existing_files(&archive_dir)?;
+        if numbers.0 == 0 {
             return Err(anyhow::anyhow!(
                 "No existing slab files found in {:?}",
                 archive_dir.as_ref()
             ));
         }
+        Ok(numbers)
+    }
+
+    pub fn open_for_read<P: AsRef<Path>>(archive_dir: P, cache_nr_entries: usize) -> Result<Self> {
+        // Discover existing files
+        let (_, total_slabs) = MultiFile::total_number_slabs(&archive_dir)?;
 
         Ok(Self {
             base_path: archive_dir.as_ref().to_path_buf(),
