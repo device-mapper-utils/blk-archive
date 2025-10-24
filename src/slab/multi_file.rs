@@ -195,7 +195,7 @@ impl MultiFile {
             }
 
             // Lets just re-generate and move on...
-            let mut slab_offsets = regenerate_index(file_path, None)?;
+            let mut slab_offsets = regenerate_index(file_path)?;
             slab_offsets.write_offset_file(true)?;
             drop(slab_offsets);
 

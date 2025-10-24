@@ -652,12 +652,12 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
                 Ok(offsets) => offsets,
                 Err(_) => {
                     // Failed to read, regenerate
-                    crate::slab::regenerate_index(slab_path, None)?
+                    crate::slab::regenerate_index(slab_path)?
                 }
             }
         } else {
             // No offsets file, regenerate
-            crate::slab::regenerate_index(slab_path, None)?
+            crate::slab::regenerate_index(slab_path)?
         };
 
         Ok((offsets, false))
@@ -697,20 +697,18 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
         drop(hashes_offsets);
 
         // Try regenerating both to be sure, regenerating index files is safe.
-        let mut data_offsets =
-            crate::slab::regenerate_index(data_path, None).with_context(|| {
-                format!(
-                    "flight_check: failed to regenerate data index for {:?}",
-                    data_path
-                )
-            })?;
-        let mut hashes_offsets =
-            crate::slab::regenerate_index(hashes_path, None).with_context(|| {
-                format!(
-                    "flignt_check: Failed to regenerate hashes index for {:?}",
-                    hashes_path
-                )
-            })?;
+        let mut data_offsets = crate::slab::regenerate_index(data_path).with_context(|| {
+            format!(
+                "flight_check: failed to regenerate data index for {:?}",
+                data_path
+            )
+        })?;
+        let mut hashes_offsets = crate::slab::regenerate_index(hashes_path).with_context(|| {
+            format!(
+                "flignt_check: Failed to regenerate hashes index for {:?}",
+                hashes_path
+            )
+        })?;
 
         let hashes_count = hashes_offsets.len();
 

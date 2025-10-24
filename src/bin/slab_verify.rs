@@ -454,7 +454,7 @@ fn main() -> Result<()> {
         compare_offsets(&computed_offsets, &offsets_path)?;
     } else if args.regenerate {
         println!("Regenerating offsets file...");
-        let mut so = regenerate_index(&args.slab_file, None)?;
+        let mut so = regenerate_index(&args.slab_file)?;
         so.write_offset_file(true)?;
         println!("✓ Offsets file regenerated successfully");
     } else {

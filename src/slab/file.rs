@@ -159,98 +159,99 @@ fn writer(shared: &Shared, rx: Receiver<SlabData>, start_index: u64) {
     writer_(shared, rx, start_index).expect("write of slab failed");
 }
 
-pub fn regenerate_index<'a, P: AsRef<Path>>(
-    data_path: P,
-    check_len: Option<u64>,
-) -> Result<SlabOffsets<'a>> {
+pub fn regenerate_index<'a, P: AsRef<Path>>(data_path: P) -> Result<SlabOffsets<'a>> {
     let slab_name = data_path.as_ref().to_path_buf();
+    let slab_display = slab_name.display();
     let slab_offsets_name = offsets_path(slab_name.clone());
 
     let mut data = OpenOptions::new()
         .read(true)
         .write(false)
         .create(false)
-        .open(slab_name.clone())?;
+        .open(&slab_name)?;
 
-    let file_size = match check_len {
-        Some(len) => len,
-        None => data.metadata()?.len(),
-    };
+    let file_size = data.metadata()?.len();
 
     if file_size < crate::slab::file::SLAB_FILE_HDR_LEN {
         return Err(anyhow!(
-            "slab file {} isn't large enough to be a slab file, size = {file_size} bytes.",
-            slab_name.to_string_lossy()
+            "{slab_display} isn't large enough to be a slab file, size = {file_size} bytes."
         ));
     }
 
-    let mut so = SlabOffsets::open(slab_offsets_name, true)?;
-    let _flags = read_slab_header(&mut data)?;
+    let _flags = read_slab_header(&mut data)?; // This validates the slab header
 
     // We don't have any additional data in an empty archive
     let mut curr_offset = data.stream_position()?;
-    assert!(curr_offset == SLAB_FILE_HDR_LEN);
+    if curr_offset != SLAB_FILE_HDR_LEN {
+        return Err(anyhow!(
+            "For slab {}, after reading header, position={} but expected {}",
+            slab_display,
+            curr_offset,
+            SLAB_FILE_HDR_LEN
+        ));
+    }
+
+    // Only after we know we have a valid slab header will we muck with the index file.
+    let mut so = SlabOffsets::open(slab_offsets_name, true)?;
 
     if curr_offset == file_size {
         return Ok(so);
     }
 
-    so.append(SLAB_FILE_HDR_LEN);
+    so.append(SLAB_FILE_HDR_LEN); // The first offset for slab 0 starts at the size of the hdr
     let mut slab_index = 0;
 
     loop {
-        let remaining = file_size - curr_offset;
+        let remaining = file_size
+            .checked_sub(curr_offset)
+            .ok_or_else(|| anyhow!("position {} beyond end {}", curr_offset, file_size))?;
+
         if remaining < SLAB_HDR_LEN {
             return Err(anyhow!(
-                "Slab {slab_index} is incomplete, not enough remaining for header, \
-                {remaining} remaining bytes for data path = {:?}",
-                slab_name
+                "{slab_display}[{slab_index}] is incomplete, not enough remaining for header, \
+                {remaining} remaining bytes, need {SLAB_HDR_LEN}",
             ));
         }
 
-        let magic = data.read_u64::<LittleEndian>()?;
-        let len = data.read_u64::<LittleEndian>()?;
+        let slab_magic = data.read_u64::<LittleEndian>()?;
+        let slab_len = data.read_u64::<LittleEndian>()?;
 
-        if magic != SLAB_MAGIC {
+        if slab_magic != SLAB_MAGIC {
+            return Err(anyhow!("{slab_display}[{slab_index}] magic incorrect"));
+        }
+
+        if slab_len == 0 {
             return Err(anyhow!(
-                "slab magic incorrect for slab {slab_index} for file {}",
-                slab_name.to_string_lossy()
+                "{slab_display}[{slab_index}] zero-length slab not allowed"
+            ));
+        }
+
+        if slab_len > (crate::archive::SLAB_SIZE_TARGET * 2) as u64 {
+            return Err(anyhow!(
+                "{slab_display}[{slab_index}] length too large: {slab_len}"
             ));
         }
 
         let mut expected_csum: Hash64 = Hash64::default();
-        data.read_exact(&mut expected_csum).with_context(|| {
-            format!(
-                "Failed to read checksum for slab {} in {}",
-                slab_index,
-                slab_name.to_string_lossy()
-            )
-        })?;
+        data.read_exact(&mut expected_csum)
+            .with_context(|| format!("{slab_display}[{slab_index}] failed to read checksum"))?;
 
-        if remaining < SLAB_HDR_LEN + len {
+        if remaining < SLAB_HDR_LEN + slab_len {
             return Err(anyhow!(
-                "Slab {slab_index} is incomplete, payload is truncated, \
+                "{slab_display}[{slab_index}] is incomplete, payload is truncated, \
                 needing {}, remaining {remaining}",
-                SLAB_HDR_LEN + len
+                SLAB_HDR_LEN + slab_len
             ));
         }
 
-        let mut buf = vec![0; len as usize];
+        let mut buf = vec![0; slab_len as usize];
         data.read_exact(&mut buf).with_context(|| {
-            format!(
-                "Failed to read slab {} data ({} bytes) from {}",
-                slab_index,
-                len,
-                slab_name.to_string_lossy()
-            )
+            format!("{slab_display}[{slab_index}] error while trying to read ({slab_len} bytes)",)
         })?;
 
         let actual_csum = hash_64(&buf);
         if actual_csum != expected_csum {
-            return Err(anyhow!(
-                "slab {slab_index} checksum incorrect for file {}!",
-                slab_name.to_string_lossy()
-            ));
+            return Err(anyhow!("{slab_display}[{slab_index}] checksum incorrect!"));
         }
 
         curr_offset = data.stream_position()?;
