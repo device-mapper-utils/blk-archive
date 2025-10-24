@@ -5,7 +5,6 @@ use crate::hash::*;
 use crate::hash_index::*;
 use crate::iovec::*;
 use crate::paths;
-use crate::paths::*;
 use crate::recovery::*;
 use crate::slab::MultiFile;
 use crate::slab::*;
@@ -630,7 +629,7 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
         )
     })?;
 
-    let hashes_file = hashes_path(&archive_path);
+    let hashes_file = paths::hashes_path(&archive_path);
     let data_path = data_file.as_ref();
     let hashes_path = hashes_file.as_ref();
 
@@ -824,7 +823,7 @@ mod tests {
 
         let data_file = MultiFile::open_for_write(archive_path, 10, slab_capacity)?;
         let hashes_file = Arc::new(Mutex::new(
-            SlabFileBuilder::open(hashes_path(&archive_path))
+            SlabFileBuilder::open(paths::hashes_path(&archive_path))
                 .write(true)
                 .queue_depth(16)
                 .build()
@@ -935,7 +934,7 @@ mod tests {
 
         let data_file = MultiFile::open_for_write(archive_path, 10, slab_capacity)?;
         let hashes_file = Arc::new(Mutex::new(
-            SlabFileBuilder::open(hashes_path(&archive_path))
+            SlabFileBuilder::open(paths::hashes_path(&archive_path))
                 .write(true)
                 .queue_depth(16)
                 .build()

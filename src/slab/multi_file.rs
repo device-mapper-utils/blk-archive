@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::archive::SLAB_SIZE_TARGET;
-use crate::slab::file::*;
 use crate::slab::storage::*;
+use crate::slab::*;
 
 /// Error returned when attempting to write a slab at a file boundary
 ///
