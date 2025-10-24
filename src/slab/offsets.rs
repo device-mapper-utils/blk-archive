@@ -39,6 +39,42 @@ pub struct SlabOffsets<'a> {
     digest: crc::Digest<'a, u64>,
 }
 
+impl<'a> std::fmt::Debug for SlabOffsets<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let alt = f.alternate();
+
+        const PREVIEW: usize = 8;
+        let existing_preview = &self.existing_offsets[..self.existing_offsets.len().min(PREVIEW)];
+        let new_preview = &self.new_offsets[..self.new_offsets.len().min(PREVIEW)];
+
+        let map_present = self.map.is_some();
+        let map_len = self.map.as_ref().map(|m| m.len()).unwrap_or(0);
+        let map_file_present = self.map_file.is_some();
+
+        let crc_now = self.digest.clone().finalize(); // need to clone so we don't disturb running calculation
+
+        let mut ds = f.debug_struct("SlabOffsets");
+        ds.field("path", &self.path)
+            .field("existing_count", &self.existing_count)
+            .field("map_present", &map_present)
+            .field("map_len", &map_len)
+            .field("map_file_present", &map_file_present)
+            .field("crc64", &format_args!("0x{:016x}", crc_now));
+
+        if alt {
+            ds.field("existing_offsets", &self.existing_offsets)
+                .field("new_offsets", &self.new_offsets);
+        } else {
+            ds.field("existing_offsets_len", &self.existing_offsets.len())
+                .field("existing_offsets_preview", &existing_preview)
+                .field("new_offsets_len", &self.new_offsets.len())
+                .field("new_offsets_preview", &new_preview);
+        }
+
+        ds.finish()
+    }
+}
+
 impl SlabOffsets<'_> {
     /// Open an offsets file. Valid states:
     /// - size == 0: empty, no seal; existing_count=0, crc64 seeded to initial.
