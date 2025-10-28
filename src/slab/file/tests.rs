@@ -6,11 +6,11 @@ use tempfile::*;
 
 use crate::archive::SLAB_SIZE_TARGET;
 use crate::hash::{hash_64, Hash64};
-use crate::slab::file::{FILE_MAGIC, FORMAT_VERSION, SLAB_FILE_HDR_LEN, SLAB_HDR_LEN, SLAB_MAGIC};
+use crate::slab::file::{FILE_MAGIC, FORMAT_VERSION, SLAB_FILE_HDR_LEN, SLAB_MAGIC};
 use crate::slab::SlabFileBuilder;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 //-----------------------------------------
@@ -45,15 +45,6 @@ fn write_slab(f: &mut File, payload: &[u8]) -> std::io::Result<()> {
 fn pad_bytes(f: &mut File, n: usize) -> std::io::Result<()> {
     let zeros = vec![0u8; n];
     f.write_all(&zeros)
-}
-
-fn create_trunc_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
 }
 
 //-----------------------------------------
