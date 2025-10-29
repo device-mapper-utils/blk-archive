@@ -41,7 +41,8 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
             let source = cfg.name.unwrap();
             let size = cfg.size;
             j_output.push(json!(
-                {"stream_id": id, "size": size, "time": time.to_rfc3339(), "source": source}
+                {"stream_id": id, "size": size, "time": time.to_rfc3339(), "source": source,
+                "source_path": cfg.source_path}
             ));
         }
 
