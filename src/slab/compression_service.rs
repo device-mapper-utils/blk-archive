@@ -115,7 +115,7 @@ fn compression_worker_<C: Compressor>(
             let compressed_data = match compressor.compress(&data.data) {
                 Ok(data) => data,
                 Err(e) => {
-                    let _ = error_tx.send(e.into());
+                    let _ = error_tx.send(e);
                     continue;
                 }
             };
@@ -311,7 +311,7 @@ mod tests {
             // Use a timeout to avoid hanging if the test fails
             match output_rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(data) => results.push(data),
-                Err(e) => panic!("Failed to receive compressed data: {}", e),
+                Err(e) => panic!("Failed to receive compressed data: {e}"),
             }
         }
 
@@ -384,7 +384,7 @@ mod tests {
                     // Track which indices we've received
                     received_indices.insert(data.index);
                 }
-                Err(e) => panic!("Failed to receive data: {}", e),
+                Err(e) => panic!("Failed to receive data: {e}"),
             }
         }
 
@@ -405,9 +405,7 @@ mod tests {
         // Allow some overhead, but should be at least 2x faster with 4 workers
         assert!(
             elapsed < theoretical_single_thread / 2,
-            "Expected parallel speedup not achieved: {:?} vs theoretical single-thread {:?}",
-            elapsed,
-            theoretical_single_thread
+            "Expected parallel speedup not achieved: {elapsed:?} vs theoretical single-thread {theoretical_single_thread:?}"
         );
 
         // Check for errors
@@ -510,7 +508,7 @@ mod tests {
         // Verify we can still receive successful results
         match output_rx.recv_timeout(std::time::Duration::from_secs(1)) {
             Ok(data) => assert_eq!(data.index, 20),
-            Err(e) => panic!("Failed to receive additional data: {}", e),
+            Err(e) => panic!("Failed to receive additional data: {e}"),
         }
 
         // Clean up
@@ -581,10 +579,10 @@ mod tests {
         results.sort_by_key(|d| d.index);
 
         // Verify all data was processed correctly
-        for i in 0..NUM_ITEMS {
-            assert_eq!(results[i].index, i as u64);
-            assert_eq!(results[i].data.len(), 100);
-            assert_eq!(results[i].data[0], i as u8);
+        for (i, result) in results.iter().enumerate().take(NUM_ITEMS) {
+            assert_eq!(result.index, i as u64);
+            assert_eq!(result.data.len(), 100);
+            assert_eq!(result.data[0], i as u8);
         }
 
         // Join the service - this should complete quickly since we already shut it down
@@ -595,8 +593,7 @@ mod tests {
         // Join should be quick since we already initiated shutdown
         assert!(
             join_duration < std::time::Duration::from_millis(500),
-            "Join took too long after graceful shutdown: {:?}",
-            join_duration
+            "Join took too long after graceful shutdown: {join_duration:?}"
         );
 
         // Verify no errors occurred
@@ -664,8 +661,7 @@ mod tests {
         // Immediate shutdown should be quick
         assert!(
             shutdown_duration < std::time::Duration::from_millis(500),
-            "Immediate shutdown took too long: {:?}",
-            shutdown_duration
+            "Immediate shutdown took too long: {shutdown_duration:?}"
         );
 
         // Try to receive any additional items that might have been processed
@@ -685,23 +681,20 @@ mod tests {
         // With immediate shutdown, we expect that not all items were processed
         assert!(
             total_processed < NUM_ITEMS,
-            "Expected fewer than {} items to be processed with immediate shutdown, but got {}",
-            NUM_ITEMS,
-            total_processed
+            "Expected fewer than {NUM_ITEMS} items to be processed with immediate shutdown, but got {total_processed}"
         );
 
         // Verify no errors occurred during shutdown
         let errors = service.collect_errors();
         assert!(
             errors.is_empty(),
-            "Unexpected errors during shutdown: {:?}",
-            errors
+            "Unexpected errors during shutdown: {errors:?}"
         );
 
         // Verify the items that were processed have the correct data
         let all_processed: Vec<SlabData> = processed_before_shutdown
             .into_iter()
-            .chain(processed_after_shutdown.into_iter())
+            .chain(processed_after_shutdown)
             .collect();
 
         for processed in &all_processed {
