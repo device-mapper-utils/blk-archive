@@ -161,8 +161,8 @@ impl Builder for MappingBuilder {
 
 //------------------------------
 
-pub struct DeltaBuilder<'a> {
-    old_entries: StreamIter<'a>,
+pub struct DeltaBuilder<'a, S: StreamData> {
+    old_entries: StreamIter<'a, S>,
     old_entry: Option<MapEntry>, // unconsumed remnant from the old_entries
 
     // FIXME: wrap these two up together, lru cache, share somehow with pack?
@@ -172,8 +172,8 @@ pub struct DeltaBuilder<'a> {
     builder: MappingBuilder,
 }
 
-impl<'a> DeltaBuilder<'a> {
-    pub fn new(old_entries: StreamIter<'a>, hashes_file: Arc<Mutex<SlabFile<'a>>>) -> Self {
+impl<'a, S: StreamData> DeltaBuilder<'a, S> {
+    pub fn new(old_entries: StreamIter<'a, S>, hashes_file: Arc<Mutex<SlabFile<'a>>>) -> Self {
         Self {
             old_entries,
             old_entry: None,
@@ -363,7 +363,7 @@ impl<'a> DeltaBuilder<'a> {
     }
 }
 
-impl<'a> Builder for DeltaBuilder<'a> {
+impl<'a, S: StreamData> Builder for DeltaBuilder<'a, S> {
     fn next(&mut self, e: &MapEntry, len: u64, w: &mut Vec<u8>) -> Result<()> {
         use MapEntry::*;
 

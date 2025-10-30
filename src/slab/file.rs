@@ -739,4 +739,23 @@ impl<'a> SlabStorage for SlabFile<'a> {
     }
 }
 
+/// Trait for types that can provide stream data for iteration
+pub trait StreamData {
+    /// Read a slab by its index
+    fn read(&mut self, slab: u32) -> Result<Arc<Vec<u8>>>;
+
+    /// Get the total number of slabs available
+    fn get_nr_slabs(&self) -> usize;
+}
+
+impl<'a> StreamData for SlabFile<'a> {
+    fn read(&mut self, slab: u32) -> Result<Arc<Vec<u8>>> {
+        self.read(slab)
+    }
+
+    fn get_nr_slabs(&self) -> usize {
+        self.get_nr_slabs()
+    }
+}
+
 //-----------------------------------------

@@ -887,25 +887,27 @@ fn unpack_instructions(buf: &[u8]) -> Result<Vec<MapInstruction>> {
 
 //-----------------------------------------
 
-pub struct StreamIter<'a> {
-    file: SlabFile<'a>,
+pub struct StreamIter<'a, S: StreamData> {
+    file: S,
     slab: u32,
     entries: Vec<MapEntry>,
     index: usize,
+    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a> StreamIter<'a> {
-    pub fn new(mut file: SlabFile<'a>) -> Result<Self> {
+impl<'a, S: StreamData> StreamIter<'a, S> {
+    pub fn new(mut file: S) -> Result<Self> {
         let entries = Self::read_slab(&mut file, 0)?;
         Ok(Self {
             file,
             slab: 0,
             entries,
             index: 0,
+            _phantom: std::marker::PhantomData,
         })
     }
 
-    fn read_slab(file: &mut SlabFile, slab: u32) -> Result<Vec<MapEntry>> {
+    fn read_slab(file: &mut S, slab: u32) -> Result<Vec<MapEntry>> {
         let buf = file.read(slab)?;
         let (entries, _positions) = unpack(&buf)?;
         Ok(entries)
@@ -924,7 +926,7 @@ impl<'a> StreamIter<'a> {
     }
 }
 
-impl<'a> Iterator for StreamIter<'a> {
+impl<'a, S: StreamData> Iterator for StreamIter<'a, S> {
     type Item = Result<MapEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -979,18 +981,18 @@ struct Stats {
     partial: u64,
 }
 
-pub struct Dumper {
-    stream_file: SlabFile<'static>,
+pub struct Dumper<S: StreamData> {
+    stream_file: S,
     vm_state: VMState,
     stats: Stats,
 }
 
-impl Dumper {
-    pub fn new(archive_dir: &std::path::Path, stream: &str) -> Result<Self> {
+impl<S: StreamData> Dumper<S> {
+    pub fn new(archive_dir: &std::path::Path, stream: &str) -> Result<Dumper<SlabFile<'static>>> {
         let stream_path = stream_path(archive_dir, stream);
         let stream_file = SlabFileBuilder::open(stream_path).build()?;
 
-        Ok(Self {
+        Ok(Dumper {
             stream_file,
             vm_state: VMState::default(),
             stats: Stats::default(),
