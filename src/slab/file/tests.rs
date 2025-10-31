@@ -146,6 +146,101 @@ fn sync_all_no_writes() -> Result<()> {
 }
 
 //-----------------------------------------
+
+// Test that sync_all actually persists data when writing to a new file
+// This test catches the bug where last_written was initialized to 0 instead of u64::MAX
+#[test]
+fn sync_all_first_write() -> Result<()> {
+    let td = tempdir()?;
+    let path = td.path().join("slab_file");
+
+    // Create new file and write first slab using sync_all (not close)
+    {
+        let mut slab = SlabFileBuilder::create(path.clone()).build()?;
+        slab.write_slab(&vec![42; 1024])?;
+
+        // This is the critical path that was broken: sync_all on first write
+        // to a new file (nr_existing_slabs = 0)
+        slab.sync_all()?;
+
+        // Immediately after sync_all, the slab count should reflect the write
+        // With the bug, this would return 0 because sync_all didn't wait
+        ensure!(
+            slab.get_nr_slabs() == 1,
+            "Expected 1 slab immediately after sync_all (bug: sync didn't wait for write)"
+        );
+
+        // Close to ensure offsets file is written
+        slab.close()?;
+    }
+
+    // Reopen and verify the slab was actually persisted to disk
+    {
+        let mut slab = SlabFileBuilder::open(path).build()?;
+        ensure!(slab.get_nr_slabs() == 1, "Expected 1 slab after reopen");
+        let data = slab.read(0)?;
+        ensure!(data.len() == 1024, "Expected 1024 bytes");
+        ensure!(data.iter().all(|&v| v == 42), "Expected all bytes to be 42");
+    }
+
+    Ok(())
+}
+
+//-----------------------------------------
+
+// Test that sync_all works correctly when writing multiple slabs to a new file
+#[test]
+fn sync_all_multiple_writes() -> Result<()> {
+    let td = tempdir()?;
+    let path = td.path().join("slab_file");
+
+    // Create new file, write multiple slabs, and sync after each
+    {
+        let mut slab = SlabFileBuilder::create(path.clone()).build()?;
+
+        // Write and sync first slab
+        slab.write_slab(&vec![1; 512])?;
+        slab.sync_all()?;
+        ensure!(slab.get_nr_slabs() == 1, "Expected 1 slab after first sync");
+
+        // Write and sync second slab
+        slab.write_slab(&vec![2; 1024])?;
+        slab.sync_all()?;
+        ensure!(
+            slab.get_nr_slabs() == 2,
+            "Expected 2 slabs after second sync"
+        );
+
+        // Write and sync third slab
+        slab.write_slab(&vec![3; 2048])?;
+        slab.sync_all()?;
+        ensure!(
+            slab.get_nr_slabs() == 3,
+            "Expected 3 slabs after third sync"
+        );
+
+        slab.close()?;
+    }
+
+    // Verify all slabs were persisted
+    {
+        let mut slab = SlabFileBuilder::open(path).build()?;
+        ensure!(slab.get_nr_slabs() == 3, "Expected 3 slabs after reopen");
+
+        let data0 = slab.read(0)?;
+        ensure!(data0.len() == 512 && data0.iter().all(|&v| v == 1));
+
+        let data1 = slab.read(1)?;
+        ensure!(data1.len() == 1024 && data1.iter().all(|&v| v == 2));
+
+        let data2 = slab.read(2)?;
+        ensure!(data2.len() == 2048 && data2.iter().all(|&v| v == 3));
+    }
+
+    Ok(())
+}
+
+//-----------------------------------------
 #[test]
 fn too_small_for_header_errors() {
     let td = tempdir().unwrap();
