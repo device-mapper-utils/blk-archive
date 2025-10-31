@@ -125,6 +125,32 @@ fn create(
         .close()
         .with_context(|| format!("Failed to close hashes file at {:?}", hashes_path))?;
 
+    // Create empty stream metadata slab file
+    let streams_metadata_path = paths::streams_metadata_path(archive_dir);
+    let mut metadata_file = SlabFileBuilder::create(&streams_metadata_path)
+        .queue_depth(1)
+        .compressed(false)
+        .build()?;
+    metadata_file.close().with_context(|| {
+        format!(
+            "Failed to close stream metadata file at {:?}",
+            streams_metadata_path
+        )
+    })?;
+
+    // Create empty stream mappings slab file
+    let streams_mappings_path = paths::stream_mappings_path(archive_dir);
+    let mut mappings_file = SlabFileBuilder::create(&streams_mappings_path)
+        .queue_depth(1)
+        .compressed(true)
+        .build()?;
+    mappings_file.close().with_context(|| {
+        format!(
+            "Failed to close stream mappings file at {:?}",
+            streams_mappings_path
+        )
+    })?;
+
     // Write empty index
     let index_path = paths::index_path(archive_dir);
     let index = CuckooFilter::with_capacity(cuckoo_filter::INITIAL_SIZE);

@@ -23,6 +23,7 @@ use crate::slab::builder::*;
 use crate::slab::*;
 use crate::stream;
 use crate::stream::*;
+use crate::stream_archive::StreamArchive;
 use crate::thin_metadata::*;
 use crate::utils::unmapped_digest_add;
 
@@ -35,20 +36,25 @@ trait UnpackDest {
     fn complete(&mut self) -> Result<String>;
 }
 
-struct Unpacker<D: UnpackDest, S: SlabStorage = SlabFile<'static>> {
-    stream_file: SlabFile<'static>,
+struct Unpacker<D, S, SF>
+where
+    D: UnpackDest,
+    S: SlabStorage,
+    SF: StreamData,
+{
+    stream_file: SF,
     archive: archive::Data<'static, S>,
     dest: D,
 }
 
-impl<D: UnpackDest> Unpacker<D, MultiFile> {
-    // Assumes current directory is the root of the archive.
+impl<D: UnpackDest> Unpacker<D, MultiFile, Box<dyn StreamData + Send + Sync + 'static>> {
     fn new(archive_dir: &Path, stream: &str, cache_nr_entries: usize, dest: D) -> Result<Self> {
         let data_file = MultiFile::open_for_read(archive_dir, cache_nr_entries)?;
         let hashes_file = Arc::new(Mutex::new(
             SlabFileBuilder::open(hashes_path(archive_dir)).build()?,
         ));
-        let stream_file = SlabFileBuilder::open(stream_path(archive_dir, stream)).build()?;
+
+        let stream_file = crate::stream_archive::open_stream(archive_dir, stream)?;
 
         Ok(Self {
             stream_file,
@@ -63,7 +69,7 @@ impl<D: UnpackDest> Unpacker<D, MultiFile> {
     }
 }
 
-impl<D: UnpackDest, S: SlabStorage> Unpacker<D, S> {
+impl<D: UnpackDest, S: SlabStorage, SF: StreamData + 'static> Unpacker<D, S, SF> {
     fn unpack_entry(&mut self, e: &MapEntry) -> Result<()> {
         use MapEntry::*;
         match e {
@@ -440,7 +446,8 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
             .context("Couldn't open output")?
     };
 
-    let stream_cfg = config::read_stream_config(&archive_dir, stream)?;
+    let s_id = crate::stream_archive::parse_stream_id(stream)?;
+    let stream_cfg = StreamArchive::open_read(&archive_dir)?.read_config(s_id)?;
 
     report_output
         .report
@@ -761,7 +768,9 @@ pub fn run_verify(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     let cache_nr_entries = (1024 * 1024 * config.data_cache_size_meg) / SLAB_SIZE_TARGET;
 
     let stream = matches.get_one::<String>("STREAM").unwrap();
-    let stream_cfg = config::read_stream_config(&archive_dir, stream)?;
+
+    let s_id = crate::stream_archive::parse_stream_id(stream)?;
+    let stream_cfg = StreamArchive::open_read(&archive_dir)?.read_config(s_id)?;
     let stored_hash = stream_cfg.source_sig;
 
     let calculated_hash = if matches.get_flag("internal") {

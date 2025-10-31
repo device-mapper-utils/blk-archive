@@ -52,7 +52,7 @@ impl SyncParentExt for Path {
 const RECOVERY_MAGIC: u64 = 0x52435652594d4147; // "RCVRYMA" + "G"
 
 /// Version for recovery file format
-const RECOVERY_VERSION: u32 = 1;
+const RECOVERY_VERSION: u32 = 2;
 
 /// Recovery checkpoint file format:
 ///
@@ -64,12 +64,14 @@ const RECOVERY_VERSION: u32 = 1;
 /// +--------------------------+
 /// | Checksum (8 bytes)       |  Blake2b-64 hash of data section
 /// +--------------------------+
-/// | Data (20 bytes)          |  All checkpoint fields (little-endian):
+/// | Data (36 bytes)          |  All checkpoint fields (little-endian):
 /// |   hashes_file_size (8)   |  Size of hashes slab file
 /// |   data_slab_file_id (4)  |  Current data slab file ID
 /// |   data_slab_file_size (8)|  Size of current data slab file
+/// |   stream_metadata_size (8)| Size of stream metadata slab file
+/// |   stream_mappings_size (8)| Size of stream mappings slab file
 /// +--------------------------+
-/// Total: 40 bytes (8 + 4 + 8 + 20)
+/// Total: 56 bytes (8 + 4 + 8 + 36)
 /// ```
 ///
 /// Recovery checkpoint structure containing all sync point information
@@ -87,6 +89,12 @@ pub struct RecoveryCheckpoint {
 
     /// Last sync'd size of the current data slab file (in bytes)
     pub data_slab_file_size: u64,
+
+    /// Last sync'd size of the stream metadata file (in bytes)
+    pub stream_metadata_size: u64,
+
+    /// Last sync'd size of the stream mappings file (in bytes)
+    pub stream_mappings_size: u64,
 }
 
 impl RecoveryCheckpoint {
@@ -96,6 +104,8 @@ impl RecoveryCheckpoint {
             hashes_file_size: 0,
             data_slab_file_id: 0,
             data_slab_file_size: 0,
+            stream_metadata_size: 0,
+            stream_mappings_size: 0,
         }
     }
 
@@ -130,6 +140,8 @@ impl RecoveryCheckpoint {
         data_buf.write_u64::<LittleEndian>(self.hashes_file_size)?;
         data_buf.write_u32::<LittleEndian>(self.data_slab_file_id)?;
         data_buf.write_u64::<LittleEndian>(self.data_slab_file_size)?;
+        data_buf.write_u64::<LittleEndian>(self.stream_metadata_size)?;
+        data_buf.write_u64::<LittleEndian>(self.stream_mappings_size)?;
 
         // Compute checksum over the data
         let checksum = crate::hash::hash_64(&data_buf);
@@ -213,10 +225,25 @@ impl RecoveryCheckpoint {
             .read_u64::<LittleEndian>()
             .context("Failed to read data_slab_file_size")?;
 
+        let (stream_metadata_size, stream_mappings_size) = if version >= 2 {
+            let metadata_size = cursor
+                .read_u64::<LittleEndian>()
+                .context("Failed to read stream_metadata_size")?;
+            let mappings_size = cursor
+                .read_u64::<LittleEndian>()
+                .context("Failed to read stream_mappings_size")?;
+            (metadata_size, mappings_size)
+        } else {
+            // Version 1: no stream files, start from empty
+            (0, 0)
+        };
+
         Ok(Self {
             hashes_file_size,
             data_slab_file_id,
             data_slab_file_size,
+            stream_metadata_size,
+            stream_mappings_size,
         })
     }
 
@@ -294,6 +321,58 @@ impl RecoveryCheckpoint {
                 file_id += 1;
             } else {
                 break;
+            }
+        }
+
+        // Truncate stream metadata file
+        let metadata_path = streams_metadata_path(archive_dir_ref);
+        if metadata_path.exists() {
+            let metadata_truncated =
+                Self::truncate_file(&metadata_path, self.stream_metadata_size)?;
+
+            if metadata_truncated
+                && self.stream_metadata_size >= crate::slab::file::SLAB_FILE_HDR_LEN
+            {
+                let mut metadata_index = crate::slab::regenerate_index(&metadata_path)
+                    .with_context(|| {
+                        format!(
+                            "Failed to regenerate stream metadata index for {:?}",
+                            metadata_path
+                        )
+                    })?;
+                metadata_index.write_offset_file(true).with_context(|| {
+                    format!(
+                        "Failed to write stream metadata offset file for {:?}",
+                        metadata_path
+                    )
+                })?;
+                drop(metadata_index);
+            }
+        }
+
+        // Truncate stream mappings file
+        let mappings_path = stream_mappings_path(archive_dir_ref);
+        if mappings_path.exists() {
+            let mappings_truncated =
+                Self::truncate_file(&mappings_path, self.stream_mappings_size)?;
+
+            if mappings_truncated
+                && self.stream_mappings_size >= crate::slab::file::SLAB_FILE_HDR_LEN
+            {
+                let mut mappings_index = crate::slab::regenerate_index(&mappings_path)
+                    .with_context(|| {
+                        format!(
+                            "Failed to regenerate stream mappings index for {:?}",
+                            mappings_path
+                        )
+                    })?;
+                mappings_index.write_offset_file(true).with_context(|| {
+                    format!(
+                        "Failed to write stream mappings offset file for {:?}",
+                        mappings_path
+                    )
+                })?;
+                drop(mappings_index);
             }
         }
 
@@ -382,10 +461,42 @@ pub fn create_checkpoint_from_files<P: AsRef<Path>>(
         .with_context(|| format!("Failed to get metadata for data file: {:?}", file_path))?
         .len();
 
+    // Get stream metadata file size
+    let metadata_path = streams_metadata_path(base_path);
+    let stream_metadata_size = if metadata_path.exists() {
+        std::fs::metadata(&metadata_path)
+            .with_context(|| {
+                format!(
+                    "Failed to get metadata for stream metadata file: {:?}",
+                    metadata_path
+                )
+            })?
+            .len()
+    } else {
+        0
+    };
+
+    // Get stream mappings file size
+    let mappings_path = stream_mappings_path(base_path);
+    let stream_mappings_size = if mappings_path.exists() {
+        std::fs::metadata(&mappings_path)
+            .with_context(|| {
+                format!(
+                    "Failed to get metadata for stream mappings file: {:?}",
+                    mappings_path
+                )
+            })?
+            .len()
+    } else {
+        0
+    };
+
     Ok(RecoveryCheckpoint {
         hashes_file_size,
         data_slab_file_id,
         data_slab_file_size,
+        stream_metadata_size,
+        stream_mappings_size,
     })
 }
 
@@ -449,6 +560,42 @@ pub fn sync_archive<P: AsRef<Path>>(archive_dir: P, data_slab_file_id: u32) -> R
         file_path.sync_parent()?;
     }
 
+    // Sync stream metadata file
+    let metadata_path = streams_metadata_path(archive_dir_ref);
+    if metadata_path.exists() {
+        let file = File::open(&metadata_path)
+            .with_context(|| format!("Failed to open stream metadata file: {:?}", metadata_path))?;
+        file.sync_all()?;
+
+        let offsets_path = metadata_path.with_extension("offsets");
+        if offsets_path.exists() {
+            let offsets_file = File::open(&offsets_path).with_context(|| {
+                format!("Failed to open metadata offsets file: {:?}", offsets_path)
+            })?;
+            offsets_file.sync_all()?;
+        }
+
+        metadata_path.sync_parent()?;
+    }
+
+    // Sync stream mappings file
+    let mappings_path = stream_mappings_path(archive_dir_ref);
+    if mappings_path.exists() {
+        let file = File::open(&mappings_path)
+            .with_context(|| format!("Failed to open stream mappings file: {:?}", mappings_path))?;
+        file.sync_all()?;
+
+        let offsets_path = mappings_path.with_extension("offsets");
+        if offsets_path.exists() {
+            let offsets_file = File::open(&offsets_path).with_context(|| {
+                format!("Failed to open mappings offsets file: {:?}", offsets_path)
+            })?;
+            offsets_file.sync_all()?;
+        }
+
+        mappings_path.sync_parent()?;
+    }
+
     Ok(())
 }
 
@@ -466,6 +613,8 @@ mod tests {
             hashes_file_size: 1024,
             data_slab_file_id: 3,
             data_slab_file_size: 4096,
+            stream_metadata_size: 2048,
+            stream_mappings_size: 8192,
         };
 
         // Write checkpoint
@@ -582,12 +731,16 @@ mod tests {
             hashes_file_size: 100,
             data_slab_file_id: 0,
             data_slab_file_size: 300,
+            stream_metadata_size: 0,
+            stream_mappings_size: 0,
         };
 
         let checkpoint2 = RecoveryCheckpoint {
             hashes_file_size: 1000,
             data_slab_file_id: 1,
             data_slab_file_size: 3000,
+            stream_metadata_size: 0,
+            stream_mappings_size: 0,
         };
 
         // Write first checkpoint
@@ -614,6 +767,8 @@ mod tests {
             hashes_file_size: 1024,
             data_slab_file_id: 3,
             data_slab_file_size: 4096,
+            stream_metadata_size: 0,
+            stream_mappings_size: 0,
         };
 
         // Write valid checkpoint
@@ -647,6 +802,8 @@ mod tests {
             hashes_file_size: 1024,
             data_slab_file_id: 3,
             data_slab_file_size: 4096,
+            stream_metadata_size: 0,
+            stream_mappings_size: 0,
         };
 
         // Write valid checkpoint

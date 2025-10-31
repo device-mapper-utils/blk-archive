@@ -651,7 +651,6 @@ fn apply_check_point<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
 /// * `Err` if slab counts don't match after regeneration
 pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
     // Make sure the archive directory actually exists
-
     if !RecoveryCheckpoint::exists(&archive_path) {
         return Err(anyhow!(format!(
             "archive and/or checkpoint file for {:?} does not exist!",
@@ -706,17 +705,6 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
                 hash_slab_count
             ));
         }
-    }
-
-    // Lastly, remove any in-progress streams file
-    if let Err(e) = crate::paths::cleanup_temp_streams(
-        archive_path
-            .as_ref()
-            .to_path_buf()
-            .join("streams")
-            .as_path(),
-    ) {
-        eprintln!("Warning: Failed to cleanup temp directories: {}", e);
     }
 
     Ok(())

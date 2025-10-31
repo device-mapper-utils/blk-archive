@@ -33,7 +33,7 @@ mod tests;
 
 const FILE_MAGIC: u64 = 0xb927f96a6b611180;
 const SLAB_MAGIC: u64 = 0x20565137a3100a7c;
-const SLAB_FILE_HDR_LEN: u64 = 16;
+pub const SLAB_FILE_HDR_LEN: u64 = 16;
 const SLAB_HDR_LEN: u64 = 24;
 
 const FORMAT_VERSION: u32 = 0;
@@ -755,6 +755,16 @@ impl<'a> StreamData for SlabFile<'a> {
 
     fn get_nr_slabs(&self) -> usize {
         self.get_nr_slabs()
+    }
+}
+
+impl<'a> StreamData for Box<dyn StreamData + Send + Sync + 'a> {
+    fn read(&mut self, slab: u32) -> Result<Arc<Vec<u8>>> {
+        (**self).read(slab)
+    }
+
+    fn get_nr_slabs(&self) -> usize {
+        (**self).get_nr_slabs()
     }
 }
 

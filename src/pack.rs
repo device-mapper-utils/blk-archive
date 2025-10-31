@@ -1,8 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::prelude::*;
 use clap::ArgMatches;
-use rand::prelude::*;
-use rand_chacha::ChaCha20Rng;
 use serde_json::json;
 use serde_json::to_string_pretty;
 use size_display::Size;
@@ -28,7 +26,11 @@ use crate::slab::builder::*;
 use crate::slab::*;
 use crate::splitter::*;
 use crate::stream::*;
+use crate::stream_archive::{
+    parse_stream_id, read_stream_config, retrieve_stream_slab, StreamArchive,
+};
 use crate::stream_builders::*;
+use crate::stream_metadata::serialize_stream_config;
 use crate::thin_metadata::*;
 use crate::utils::unmapped_digest_add;
 
@@ -77,8 +79,9 @@ struct DedupStats {
 struct DedupHandler<'a> {
     nr_chunks: usize,
 
-    stream_file: SlabFile<'a>,
+    stream_mappings: Arc<Mutex<SlabFile<'a>>>,
     stream_buf: Vec<u8>,
+    first_mapping_slab: u32, // Track starting slab for this stream
 
     mapping_builder: Arc<Mutex<dyn Builder>>,
 
@@ -88,16 +91,23 @@ struct DedupHandler<'a> {
 
 impl<'a> DedupHandler<'a> {
     fn new(
-        stream_file: SlabFile<'a>,
+        stream_mappings: Arc<Mutex<SlabFile<'a>>>,
         mapping_builder: Arc<Mutex<dyn Builder>>,
         archive: Data<'a, MultiFile>,
     ) -> Result<Self> {
         let stats = DedupStats::default();
 
+        // Record the starting slab number for this stream
+        let first_mapping_slab = {
+            let mappings = stream_mappings.lock().unwrap();
+            mappings.get_nr_slabs() as u32
+        };
+
         Ok(Self {
             nr_chunks: 0,
-            stream_file,
+            stream_mappings,
             stream_buf: Vec::new(),
+            first_mapping_slab,
             mapping_builder,
             stats,
             archive,
@@ -105,8 +115,9 @@ impl<'a> DedupHandler<'a> {
     }
 
     fn maybe_complete_stream(&mut self) -> Result<()> {
+        let mut mappings = self.stream_mappings.lock().unwrap();
         complete_slab(
-            &mut self.stream_file,
+            &mut *mappings,
             &mut self.stream_buf,
             SLAB_SIZE_TARGET,
             false,
@@ -186,48 +197,27 @@ impl<'a> IoVecHandler for DedupHandler<'a> {
         builder.complete(&mut self.stream_buf)?;
         drop(builder);
 
-        complete_slab(&mut self.stream_file, &mut self.stream_buf, 0, false)?;
-        self.stream_file.close()?;
+        // Force write remaining data as final slab
+        let mut mappings = self.stream_mappings.lock().unwrap();
+        complete_slab(&mut *mappings, &mut self.stream_buf, 0, false)?;
+        mappings.sync_all()?;
 
         Ok(())
     }
 }
 
-//-----------------------------------------
-
-// Returns (stream_id, temp_path, final_path)
-fn new_stream_path_(
-    archive_dir: &Path,
-    rng: &mut ChaCha20Rng,
-) -> Result<Option<(String, PathBuf, PathBuf)>> {
-    // choose a random number
-    let n: u64 = rng.gen();
-
-    // turn this into a path
-    let name = format!("{:>016x}", n);
-    let temp_name = format!(".tmp_{}", name);
-    let temp_path: PathBuf = ["streams", &temp_name].iter().collect();
-    let final_path: PathBuf = ["streams", &name].iter().collect();
-    let final_path = archive_dir.join(final_path);
-    let temp_path = archive_dir.join(&temp_path);
-
-    // Check both temp and final paths don't exist
-    if temp_path.exists() || final_path.exists() {
-        Ok(None)
-    } else {
-        Ok(Some((name, temp_path, final_path)))
-    }
-}
-
-fn new_stream_path(archive_dir: &Path) -> Result<(String, PathBuf, PathBuf)> {
-    let mut rng = ChaCha20Rng::from_entropy();
-    loop {
-        if let Some(r) = new_stream_path_(archive_dir, &mut rng)? {
-            return Ok(r);
-        }
+// Additional methods for DedupHandler (not part of IoVecHandler trait)
+impl<'a> DedupHandler<'a> {
+    /// Get the number of mapping slabs used by this stream
+    fn get_num_mapping_slabs(&self) -> u32 {
+        let mappings = self.stream_mappings.lock().unwrap();
+        (mappings.get_nr_slabs() as u32) - self.first_mapping_slab
     }
 
-    // Can't get here
+    /// Get mapping slab range for this stream
+    fn get_mapping_slab_range(&self) -> (u32, u32) {
+        (self.first_mapping_slab, self.get_num_mapping_slabs())
+    }
 }
 
 #[inline]
@@ -311,14 +301,17 @@ impl Packer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn pack(
         mut self,
         archive_dir: &Path,
         hashes_file: Arc<Mutex<SlabFile<'static>>>,
+        stream_metadata: Arc<Mutex<SlabFile<'static>>>,
+        stream_mappings: Arc<Mutex<SlabFile<'static>>>,
         data_archive_opt: Option<Data<'static, MultiFile>>,
         splitter: &mut ContentSensitiveSplitter,
         is_last_file: bool,
-    ) -> Result<(u32, Data<'static, MultiFile>)> {
+    ) -> Result<(u64, Data<'static, MultiFile>)> {
         // Reuse existing Data archive or create a new one
         let ad = if let Some(archive) = data_archive_opt {
             archive
@@ -346,21 +339,9 @@ impl Packer {
             )?
         };
 
-        let (stream_id, temp_stream_dir, final_stream_dir) = new_stream_path(archive_dir)?;
-
-        // Create temporary stream directory
-        std::fs::create_dir(&temp_stream_dir)
-            .with_context(|| format!("error creating directory = {:?}", temp_stream_dir))?;
-        let mut stream_path = temp_stream_dir.clone();
-        stream_path.push("stream");
-
-        let stream_file = SlabFileBuilder::create(&stream_path)
-            .queue_depth(16)
-            .compressed(true)
-            .build()
-            .context("couldn't open stream slab file")?;
-
-        let mut handler = DedupHandler::new(stream_file, self.mapping_builder.clone(), ad)?;
+        // Create DedupHandler with shared stream_mappings file
+        let mut handler =
+            DedupHandler::new(stream_mappings.clone(), self.mapping_builder.clone(), ad)?;
 
         handler.ensure_extra_capacity(self.mapped_size as usize / self.block_size)?;
 
@@ -430,24 +411,35 @@ impl Packer {
         }
         self.output.report.progress(100);
 
-        // Complete the handler to flush and close the stream file for each file
+        // Complete the handler to flush stream mappings
         handler
             .complete()
-            .with_context(|| format!("error while completing the stream {:?}", stream_path))?;
+            .context("error while completing the stream mappings")?;
 
         let input_hex_digest = input_digest.finalize().to_hex().to_string();
+
+        // Get mapping slab range for this stream
+        let (first_mapping_slab, num_mapping_slabs) = handler.get_mapping_slab_range();
+
+        // Calculate stream written size (approximate based on slab count)
+        let stream_written = (num_mapping_slabs as u64) * (SLAB_SIZE_TARGET as u64);
 
         let end_time: DateTime<Utc> = Utc::now();
         let elapsed = end_time - start_time;
         let elapsed = elapsed.num_milliseconds() as f64 / 1000.0;
-        let stream_written = handler.stream_file.get_file_size();
         let ratio =
             (self.mapped_size as f64) / ((handler.stats.data_written + stream_written) as f64);
+
+        // Allocate stream_id (which is the next metadata slab number)
+        let stream_id = {
+            let metadata = stream_metadata.lock().unwrap();
+            metadata.get_nr_slabs() as u64
+        };
 
         if self.output.json {
             // Should all the values simply be added to the json too?  We can always add entries, but
             // we can never take any away to maintains backwards compatibility with JSON consumers.
-            let result = json!({ "input_file": self.input_path, "stream_id": stream_id, "stats": handler.stats, "hash": input_hex_digest});
+            let result = json!({ "input_file": self.input_path, "stream_id": format!("{stream_id}"), "stats": handler.stats, "hash": input_hex_digest});
             println!("{}", to_string_pretty(&result).unwrap());
         } else {
             self.output
@@ -490,12 +482,7 @@ impl Packer {
             ));
         }
 
-        // Write stream config to temp directory
-        let temp_stream_id = temp_stream_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid temp stream directory"))?;
-
+        // Write stream metadata to binary slab file
         let cfg = config::StreamConfig {
             name: Some(self.stream_name.to_string()),
             source_path: self.input_path.display().to_string(),
@@ -505,25 +492,27 @@ impl Packer {
             packed_size: handler.stats.data_written + stream_written,
             thin_id: self.thin_id,
             source_sig: Some(input_hex_digest),
+            first_mapping_slab,
+            num_mapping_slabs,
         };
-        config::write_stream_config(archive_dir, temp_stream_id, &cfg)?;
 
-        // Atomically move temp stream directory to final location
-        // This is the commit point - either the stream exists completely or not at all
-        std::fs::rename(&temp_stream_dir, &final_stream_dir).with_context(|| {
-            format!(
-                "Failed to atomically commit stream directory: {:?} -> {:?}",
-                temp_stream_dir, final_stream_dir
-            )
-        })?;
+        let metadata_bytes =
+            serialize_stream_config(&cfg).context("Failed to serialize stream config")?;
 
-        //TODO: Sync stream directory?
+        {
+            let mut metadata = stream_metadata.lock().unwrap();
+            metadata
+                .write_slab(&metadata_bytes)
+                .context("Failed to write stream metadata slab")?;
+            metadata
+                .sync_all()
+                .context("Failed to sync stream metadata")?;
+        }
 
         // Extract the Data archive from the handler to return it for reuse
         let archive = handler.take_archive();
-        let data_slab_file_id = archive.get_current_write_file_id();
 
-        Ok((data_slab_file_id, archive))
+        Ok((stream_id, archive))
     }
 }
 
@@ -605,10 +594,13 @@ fn thin_packer(
 }
 
 // FIXME: slow
-fn open_thin_stream(base: &Path, stream_id: &str) -> Result<SlabFile<'static>> {
-    SlabFileBuilder::open(stream_path(base, stream_id))
-        .build()
-        .context("couldn't open old stream file")
+fn open_thin_stream(
+    base: &Path,
+    stream_id: &str,
+) -> Result<Box<dyn StreamData + Send + Sync + 'static>> {
+    // Parse stream ID (supports both hex and decimal)
+    let id = parse_stream_id(stream_id)?;
+    retrieve_stream_slab(base, id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -631,7 +623,7 @@ fn thin_delta_packer(
     let input_size = thinp::file_utils::file_size(input_file)?;
 
     let mappings = read_thin_delta(delta_device, input_file)?;
-    let old_config = config::read_stream_config(archive_dir, delta_id)?;
+    let old_config = read_stream_config(archive_dir, delta_id)?;
     let mapped_size = old_config.mapped_size;
 
     let run_iter = DualIter::new(
@@ -742,6 +734,9 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
             .context("couldn't open hashes slab file")?,
     ));
 
+    // Open stream archive for writing
+    let mut stream_archive = StreamArchive::open_write(&archive_dir, 16)?;
+
     // Categorize input files into delta, thin, and thick lists
     let mut delta_block_devs = Vec::new();
     let mut thin_block_devs = Vec::new();
@@ -793,6 +788,7 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
                 output.clone(),
                 &config,
                 hashes_file.clone(),
+                &stream_archive,
                 sync_point_secs,
                 |output, input_file, input_name, config, hashes_file, sync_point_secs| {
                     thin_delta_packer(
@@ -825,6 +821,7 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
             output.clone(),
             &config,
             hashes_file.clone(),
+            &stream_archive,
             sync_point_secs,
             |output, input_file, input_name, config, _hashes_file, sync_point_secs| {
                 thin_packer(output, input_file, input_name, config, sync_point_secs)
@@ -846,6 +843,7 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
             output.clone(),
             &config,
             hashes_file.clone(),
+            &stream_archive,
             sync_point_secs,
             |output, input_file, input_name, config, _hashes_file, sync_point_secs| {
                 thick_packer(output, input_file, input_name, config, sync_point_secs)
@@ -859,6 +857,9 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
         })?;
     }
 
+    // Close stream files to ensure offset files are written
+    stream_archive.close()?;
+
     // Write final checkpoint after all files are processed
     if let Some(mut archive) = final_archive {
         archive.sync_checkpoint()?;
@@ -867,12 +868,14 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_file_list<F>(
     archive_dir: &Path,
     files: &[PathBuf],
     output: Arc<Output>,
     config: &config::Config,
     hashes_file: Arc<Mutex<SlabFile<'static>>>,
+    stream_archive: &StreamArchive<'static>,
     sync_point_secs: u64,
     packer_factory: F,
 ) -> Result<Option<Data<'static, MultiFile>>>
@@ -890,6 +893,10 @@ where
 
     // Create a single splitter to be reused across all files
     let mut splitter = ContentSensitiveSplitter::new(config.block_size as u32);
+
+    // Extract metadata and mappings files from stream_archive
+    let stream_metadata = stream_archive.metadata_file();
+    let stream_mappings = stream_archive.mappings_file();
 
     for (idx, input_file) in files.iter().enumerate() {
         let is_last_file = idx == files.len() - 1;
@@ -919,10 +926,12 @@ where
         output
             .report
             .set_title(&format!("Packing {} ...", input_file.display()));
-        let (_slab_id, archive) = packer
+        let (_stream_id, archive) = packer
             .pack(
                 archive_dir,
                 hashes_file.clone(),
+                stream_metadata.clone(),
+                stream_mappings.clone(),
                 data_archive_opt,
                 &mut splitter,
                 is_last_file,
