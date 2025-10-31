@@ -343,8 +343,9 @@ impl<'a> SlabFile<'a> {
                 offsets,
                 file_size,
                 progress: Progress {
-                    last_submitted: 0, // or 0 on create
-                    last_written: 0,
+                    last_submitted: 0,
+                    // Initialize to wrapping -1 so first write (index 0) will update last_written
+                    last_written: 0u64.wrapping_sub(1),
                 },
                 pending_writes: std::collections::HashMap::new(),
             }),
@@ -416,7 +417,9 @@ impl<'a> SlabFile<'a> {
                 file_size,
                 progress: Progress {
                     last_submitted: nr_existing_slabs, // or 0 on create
-                    last_written: nr_existing_slabs.saturating_sub(1),
+                    // Use wrapping_sub so that 0 - 1 = u64::MAX (not 0 from saturating)
+                    // This ensures the first write (index 0) will update last_written
+                    last_written: nr_existing_slabs.wrapping_sub(1),
                 },
                 pending_writes: std::collections::HashMap::new(),
             }),
@@ -514,7 +517,10 @@ impl<'a> SlabFile<'a> {
             let (lock, cv) = &*self.shared;
             let mut sh = lock.lock().unwrap();
             sh = cv
-                .wait_while(sh, |sh| sh.progress.last_written < target)
+                .wait_while(sh, |sh| {
+                    // Handle wraparound: u64::MAX means "not yet written"
+                    sh.progress.last_written == u64::MAX || sh.progress.last_written < target
+                })
                 .unwrap();
 
             sh.data.sync_all()?;
