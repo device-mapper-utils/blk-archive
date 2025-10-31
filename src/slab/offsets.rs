@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use crc::Crc;
 use memmap2::Mmap;
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const FOOT_MAGIC_CRC64: u64 = 0x7C0A_10A3_3751_5620; // "seal w/ crc64" marker
@@ -162,18 +162,25 @@ impl SlabOffsets<'_> {
             let mmap = unsafe { Mmap::map(&f)? };
             (Some(mmap), Some(f), Vec::new())
         } else {
-            // Small file: load into RAM
+            // Small file: load into RAM using a buffered reader
             let mut offsets = Vec::with_capacity(count as usize);
             (&f).seek(SeekFrom::Start(0)).with_context(|| {
                 format!("SlabOffsets:: Failed to seek to start of {:?}", pathbuf)
             })?;
+
+            let mut reader = BufReader::new(&f);
+            let mut buf = [0u8; 8];
             for i in 0..count {
-                let mut buf = [0u8; 8];
-                (&f).read_exact(&mut buf).with_context(|| {
-                    format!("SlabOffsets:Failed to read offset {} from {:?}", i, pathbuf)
+                reader.read_exact(&mut buf).with_context(|| {
+                    format!(
+                        "SlabOffsets: Failed to read offset {} from {:?}",
+                        i, pathbuf
+                    )
                 })?;
                 offsets.push(u64::from_le_bytes(buf));
             }
+
+            drop(reader);
             drop(f);
             (None, None, offsets)
         };
@@ -291,7 +298,7 @@ impl SlabOffsets<'_> {
             self.map_file = Some(f_ro);
             self.existing_offsets.clear();
         } else {
-            // Small file: load into RAM
+            // Small file: load into RAM using a buffered reader
             let f_ro = OpenOptions::new()
                 .read(true)
                 .open(&self.path)
@@ -300,13 +307,17 @@ impl SlabOffsets<'_> {
             (&f_ro)
                 .seek(SeekFrom::Start(0))
                 .with_context(|| format!("Failed to seek to start of {:?}", self.path))?;
+
+            let mut reader = BufReader::new(&f_ro);
+            let mut buf = [0u8; 8];
             for i in 0..total_count {
-                let mut buf = [0u8; 8];
-                (&f_ro)
+                reader
                     .read_exact(&mut buf)
                     .with_context(|| format!("Failed to read offset {} from {:?}", i, self.path))?;
                 offsets.push(u64::from_le_bytes(buf));
             }
+
+            drop(reader);
             drop(f_ro);
             self.map = None;
             self.map_file = None;

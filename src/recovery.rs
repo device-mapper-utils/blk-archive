@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::paths::*;
@@ -169,8 +169,11 @@ impl RecoveryCheckpoint {
     /// Read checkpoint from a file
     pub fn read<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let mut file = File::open(path)
+        let file = File::open(path)
             .with_context(|| format!("Failed to open recovery file: {:?}", path))?;
+
+        // Use buffered reader for efficient small reads
+        let mut file = BufReader::new(file);
 
         // Read and verify header
         let magic = file

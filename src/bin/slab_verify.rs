@@ -3,7 +3,7 @@ use blk_archive::slab::file::regenerate_index;
 use blk_archive::slab::offsets::validate_slab_offsets_file;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const FILE_MAGIC: u64 = 0xb927f96a6b611180;
@@ -131,7 +131,7 @@ fn offsets_path(slab_path: PathBuf) -> PathBuf {
 }
 
 fn verify_slab_file_header(slab_path: &Path) -> Result<(bool, u64)> {
-    let mut data = OpenOptions::new()
+    let data = OpenOptions::new()
         .read(true)
         .write(false)
         .create(false)
@@ -147,6 +147,9 @@ fn verify_slab_file_header(slab_path: &Path) -> Result<(bool, u64)> {
             SLAB_FILE_HDR_LEN
         ));
     }
+
+    // Use buffered reader for efficient small reads
+    let mut data = BufReader::new(data);
 
     let magic = data
         .read_u64::<LittleEndian>()
@@ -195,13 +198,16 @@ fn verify_slab_file_header(slab_path: &Path) -> Result<(bool, u64)> {
 }
 
 fn verify_slabs(slab_path: &Path, verbose: bool, max_slabs: usize) -> Result<Vec<u64>> {
-    let mut data = OpenOptions::new()
+    let data = OpenOptions::new()
         .read(true)
         .write(false)
         .create(false)
         .open(slab_path)?;
 
     let file_size = data.metadata()?.len();
+
+    // Use buffered reader for efficient small reads
+    let mut data = BufReader::new(data);
 
     // Skip header
     data.seek(SeekFrom::Start(SLAB_FILE_HDR_LEN))?;

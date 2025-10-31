@@ -3,7 +3,7 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -164,7 +164,7 @@ pub fn regenerate_index<'a, P: AsRef<Path>>(data_path: P) -> Result<SlabOffsets<
     let slab_display = slab_name.display();
     let slab_offsets_name = offsets_path(slab_name.clone());
 
-    let mut data = OpenOptions::new()
+    let data = OpenOptions::new()
         .read(true)
         .write(false)
         .create(false)
@@ -177,6 +177,9 @@ pub fn regenerate_index<'a, P: AsRef<Path>>(data_path: P) -> Result<SlabOffsets<
             "{slab_display} isn't large enough to be a slab file, size = {file_size} bytes."
         ));
     }
+
+    // Use buffered reader for efficient small reads
+    let mut data = BufReader::new(data);
 
     let _flags = read_slab_header(&mut data)?; // This validates the slab header
 
@@ -273,7 +276,7 @@ fn offsets_path<P: AsRef<Path>>(p: P) -> PathBuf {
     offsets_path
 }
 
-fn read_slab_header(data: &mut std::fs::File) -> Result<u32> {
+fn read_slab_header<R: Read + Seek>(data: &mut R) -> Result<u32> {
     let magic = data
         .read_u64::<LittleEndian>()
         .context("couldn't read magic")?;
@@ -583,8 +586,11 @@ impl<'a> SlabFile<'a> {
             .ok_or_else(|| anyhow::anyhow!("Failed to get offset for slab {}", slab))?;
         shared.data.seek(SeekFrom::Start(offset))?;
 
-        let magic = shared.data.read_u64::<LittleEndian>()?;
-        let len = shared.data.read_u64::<LittleEndian>()?;
+        // Use buffered reader for efficient small reads
+        let mut reader = BufReader::new(&mut shared.data);
+
+        let magic = reader.read_u64::<LittleEndian>()?;
+        let len = reader.read_u64::<LittleEndian>()?;
 
         if magic != SLAB_MAGIC {
             return Err(anyhow!(format!(
@@ -594,18 +600,15 @@ impl<'a> SlabFile<'a> {
         }
 
         let mut expected_csum: Hash64 = Hash64::default();
-        shared
-            .data
-            .read_exact(&mut expected_csum)
-            .with_context(|| {
-                format!(
-                    "Failed to read checksum for slab {} in {:?}",
-                    slab, self.slab_path
-                )
-            })?;
+        reader.read_exact(&mut expected_csum).with_context(|| {
+            format!(
+                "Failed to read checksum for slab {} in {:?}",
+                slab, self.slab_path
+            )
+        })?;
 
         let mut buf = vec![0; len as usize];
-        let slab_read_result = shared.data.read_exact(&mut buf);
+        let slab_read_result = reader.read_exact(&mut buf);
         if let Err(e) = slab_read_result {
             return Err(anyhow!(format!(
                 "While trying to read the slab {:?} index {} with len {} we got error '{:#}'",
