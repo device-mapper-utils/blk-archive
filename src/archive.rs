@@ -935,4 +935,152 @@ mod tests {
 
         Ok(())
     }
+
+    /// Test build_cuckoo_from_hashes function
+    ///
+    /// This test verifies that:
+    /// 1. A cuckoo filter can be built from a hashes slab file
+    /// 2. The filter contains all the hashes that were added
+    /// 3. The filter correctly handles capacity resizing
+    #[test]
+    fn test_build_cuckoo_from_hashes() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let archive_path = temp_dir.path();
+
+        // Create archive directory
+        std::fs::create_dir_all(archive_path)
+            .with_context(|| format!("Unable to create archive {:?}", archive_path))?;
+
+        // Create a default archive
+        let values = default(archive_path).with_context(|| {
+            format!("Error while creating default archive in {:?}", archive_path)
+        })?;
+        let slab_capacity = calculate_slab_capacity(values.block_size, values.hash_cache_size_meg);
+
+        // Create the data and hashes files
+        let data_file = MultiFile::open_for_write(archive_path, 10, slab_capacity)?;
+        let hashes_file = Arc::new(Mutex::new(
+            SlabFileBuilder::open(paths::hashes_path(&archive_path))
+                .write(true)
+                .queue_depth(16)
+                .build()
+                .context("couldn't open hashes slab file")?,
+        ));
+
+        // Create the Data structure to add entries
+        let mut archive = Data::new(archive_path, data_file, hashes_file.clone(), 10)?;
+
+        // Add some test data with known hashes
+        let test_blocks = 100;
+        let block_size = 4096;
+        let mut test_hashes = Vec::new();
+
+        for i in 0..test_blocks {
+            let mut data = vec![0u8; block_size];
+            // Fill with unique deterministic pattern based on index to avoid deduplication
+            // Write the index number repeatedly throughout the block
+            for j in 0..block_size / 4 {
+                data[j * 4] = (i & 0xff) as u8;
+                data[j * 4 + 1] = ((i >> 8) & 0xff) as u8;
+                data[j * 4 + 2] = (j & 0xff) as u8;
+                data[j * 4 + 3] = ((j >> 8) & 0xff) as u8;
+            }
+
+            let hash = crate::hash::hash_256(&data);
+            test_hashes.push(hash);
+
+            let mut iov = IoVec::new();
+            iov.push(&data);
+            archive.data_add(hash, &iov, data.len() as u64)?;
+        }
+
+        // Flush to ensure all data is written to hashes file
+        archive.flush()?;
+
+        // Explicitly sync to make sure everything is written
+        drop(archive);
+
+        // Get the number of slabs in the hashes file
+        let nr_slabs = {
+            let hf = hashes_file.lock().unwrap();
+            hf.get_nr_slabs()
+        };
+
+        assert!(
+            nr_slabs > 0,
+            "Should have created at least one hash index slab"
+        );
+
+        // Test 1: Build cuckoo filter with sufficient capacity
+        let sufficient_capacity = test_blocks * 2;
+        let mut filter = build_cuckoo_from_hashes(&hashes_file, sufficient_capacity)?;
+
+        assert!(
+            filter.capacity() >= sufficient_capacity,
+            "Filter capacity should be at least {}",
+            sufficient_capacity
+        );
+
+        // Test 2: Verify all hashes are in the filter
+        for (i, hash) in test_hashes.iter().enumerate() {
+            let mini_hash = hash_le_u64(hash);
+            let result = filter.test(mini_hash)?;
+            assert!(
+                matches!(
+                    result,
+                    crate::cuckoo_filter::InsertResult::PossiblyPresent(_)
+                ),
+                "Hash {} should be in the filter",
+                i
+            );
+        }
+
+        // Test 3: Build with very small capacity to trigger resizing
+        let small_capacity = 10; // Much smaller than needed
+        let mut filter_resized = build_cuckoo_from_hashes(&hashes_file, small_capacity)?;
+
+        // Should have automatically resized to fit all entries
+        assert!(
+            filter_resized.capacity() > small_capacity,
+            "Filter should have been resized from {} to {}",
+            small_capacity,
+            filter_resized.capacity()
+        );
+
+        // All hashes should still be present after resizing
+        for (i, hash) in test_hashes.iter().enumerate() {
+            let mini_hash = hash_le_u64(hash);
+            let result = filter_resized.test(mini_hash)?;
+            assert!(
+                matches!(
+                    result,
+                    crate::cuckoo_filter::InsertResult::PossiblyPresent(_)
+                ),
+                "Hash {} should be in the resized filter",
+                i
+            );
+        }
+
+        // Test 4: Empty hashes file
+        let empty_dir = temp_dir.path().join("empty");
+        std::fs::create_dir_all(&empty_dir)?;
+        default(&empty_dir)?;
+
+        let empty_hashes_file = Arc::new(Mutex::new(
+            SlabFileBuilder::open(paths::hashes_path(&empty_dir))
+                .write(true)
+                .queue_depth(16)
+                .build()
+                .context("couldn't open empty hashes slab file")?,
+        ));
+
+        let empty_filter = build_cuckoo_from_hashes(&empty_hashes_file, 100)?;
+        assert_eq!(
+            empty_filter.len(),
+            0,
+            "Empty hashes file should produce empty filter"
+        );
+
+        Ok(())
+    }
 }
