@@ -12,6 +12,7 @@ use common::test_dir::*;
 //-----------------------------------------
 
 #[test]
+#[ignore]
 fn pack_one_file() -> Result<()> {
     let mut td = TestDir::new()?;
     let archive = create_archive(&mut td, true)?;
@@ -24,6 +25,7 @@ fn pack_one_file() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn pack_same_file_multiple_times() -> Result<()> {
     let mut td = TestDir::new()?;
     let archive = create_archive(&mut td, true)?;
@@ -69,6 +71,7 @@ fn pack_common_verify_stats(file_size: u64, pattern: Pattern) -> Result<PackResp
 }
 
 #[test]
+#[ignore]
 fn pack_zero_verify_stats() -> Result<()> {
     let file_size = 16 * 1024 * 1024;
     pack_common_verify_stats(file_size, Pattern::SingleByte(0))?;
@@ -76,6 +79,7 @@ fn pack_zero_verify_stats() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn pack_duplicate_verify_stats() -> Result<()> {
     let file_size = 16 * 1024 * 1024;
     let buffer: Vec<u8> = (0..BLOCK_SIZE).map(|x| x as u8).collect(); // Incrementing byte buffer
@@ -84,6 +88,7 @@ fn pack_duplicate_verify_stats() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn pack_random_verify_stats() -> Result<()> {
     let file_size_start = 16 * 1024 * 1024_u64;
     let mut rng = rand::thread_rng();

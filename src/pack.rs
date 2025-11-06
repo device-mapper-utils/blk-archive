@@ -422,6 +422,7 @@ impl Packer {
         let (first_mapping_slab, num_mapping_slabs) = handler.get_mapping_slab_range();
 
         // Calculate stream written size (approximate based on slab count)
+        // TODO: FIX THIS!!!!
         let stream_written = (num_mapping_slabs as u64) * (SLAB_SIZE_TARGET as u64);
 
         let end_time: DateTime<Utc> = Utc::now();
