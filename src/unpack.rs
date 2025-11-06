@@ -18,6 +18,7 @@ use crate::chunkers::*;
 use crate::config;
 use crate::output::Output;
 use crate::paths::*;
+use crate::recovery;
 use crate::run_iter::*;
 use crate::slab::builder::*;
 use crate::slab::*;
@@ -129,8 +130,16 @@ impl<D: UnpackDest, S: SlabStorage, SF: StreamData + 'static> Unpacker<D, S, SF>
         let start_time: DateTime<Utc> = Utc::now();
 
         for s in 0..nr_slabs {
-            let stream_data = self.stream_file.read(s as u32)?;
-            let (entries, _positions) = unpacker.unpack(&stream_data[..])?;
+            let stream_data = self
+                .stream_file
+                .read(s as u32)
+                .with_context(|| format!("trying to read stream file slab {s}"))?;
+            let (entries, _positions) = unpacker.unpack(&stream_data[..]).with_context(|| {
+                format!(
+                    "unpacking stream data len({}) to entries",
+                    stream_data.len()
+                )
+            })?;
             let nr_entries = entries.len();
 
             for (i, e) in entries.iter().enumerate() {
@@ -153,7 +162,7 @@ impl<D: UnpackDest, S: SlabStorage, SF: StreamData + 'static> Unpacker<D, S, SF>
             }
         }
 
-        let result = self.dest.complete()?;
+        let result = self.dest.complete().with_context(|| "final 'complete'")?;
         output.report.progress(100);
         let end_time: DateTime<Utc> = Utc::now();
         let elapsed = end_time - start_time;
@@ -512,7 +521,7 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
     Ok(())
 }
 
-fn run_verify_stream(
+pub fn run_verify_stream(
     archive_dir: &Path,
     stream_id: &str,
     report_output: Arc<Output>,
@@ -526,7 +535,8 @@ fn run_verify_stream(
     let dest = ValidateStream {
         digest: blake3::Hasher::new(),
     };
-    let mut u = Unpacker::new(archive_dir, stream_id, cache_nr_entries, dest)?;
+    let mut u = Unpacker::new(archive_dir, stream_id, cache_nr_entries, dest)
+        .with_context(|| format!("unpacker::new({archive_dir:?},{stream_id},{cache_nr_entries}"))?;
     u.unpack(report_output, ouput_size)
 }
 
@@ -761,8 +771,179 @@ fn compare_hashes(stored: Option<String>, calculated_digest: String) -> Result<(
     Ok(())
 }
 
+/// Verify all streams in the archive using internal blake3 hashes.
+/// In JSON mode, streams results as a JSON array to avoid memory issues
+/// with large archives (up to 2^32-1 streams).
+fn run_verify_all(
+    matches: &ArgMatches,
+    output: Arc<Output>,
+    archive_dir: &Path,
+    cache_nr_entries: usize,
+) -> Result<()> {
+    let repair = matches.get_flag("REPAIR");
+
+    // If repair mode, run repair and return
+    if repair {
+        return recovery::repair_archive(archive_dir, output, cache_nr_entries);
+    }
+
+    // --all always uses internal verification
+    // Open stream archive to get all streams
+    let stream_archive = StreamArchive::open_read(archive_dir)?;
+    let num_streams = stream_archive.stream_count();
+
+    if num_streams == 0 {
+        if output.json {
+            println!("[]");
+        } else {
+            output.report.info("No streams found in archive");
+        }
+        return Ok(());
+    }
+
+    // Start JSON array if in JSON mode
+    if output.json {
+        println!("[");
+    }
+
+    let mut verified_count = 0;
+    let mut failed_streams = Vec::new();
+
+    for stream_id in 0..num_streams {
+        let stream_id_str = format!("{:016x}", stream_id);
+        let stream_cfg = stream_archive
+            .read_config(stream_id as u32)
+            .with_context(|| format!("Failed to read metadata for stream {}", stream_id))?;
+
+        if !output.json {
+            output
+                .report
+                .info(&format!("Verifying stream {} ...", stream_id_str));
+        }
+
+        // Create a non-JSON output for individual stream verifications
+        // to prevent each stream from outputting its own JSON
+        let stream_output = Arc::new(Output {
+            report: output.report.clone(),
+            json: false,
+        });
+
+        let result = run_verify_stream(
+            archive_dir,
+            &stream_id_str,
+            stream_output,
+            stream_cfg.size,
+            cache_nr_entries,
+        );
+
+        let (status, error_msg) = match result {
+            Ok(calculated_hash) => match compare_hashes(stream_cfg.source_sig, calculated_hash) {
+                Ok(_) => {
+                    if !output.json {
+                        output
+                            .report
+                            .info(&format!("Stream {} verified successfully", stream_id_str));
+                    }
+                    verified_count += 1;
+                    ("success", None)
+                }
+                Err(e) => {
+                    if !output.json {
+                        output.report.info(&format!(
+                            "Stream {} verification FAILED: {}",
+                            stream_id_str, e
+                        ));
+                    }
+                    failed_streams.push(stream_id_str.clone());
+                    ("failed", Some(e.to_string()))
+                }
+            },
+            Err(e) => {
+                if !output.json {
+                    output.report.info(&format!(
+                        "Stream {} verification FAILED: {}",
+                        stream_id_str, e
+                    ));
+                }
+                failed_streams.push(stream_id_str.clone());
+                ("failed", Some(e.to_string()))
+            }
+        };
+
+        // Stream JSON output as we process each stream
+        if output.json {
+            let result_json = json!({
+                "stream_id": stream_id_str,
+                "source_path": stream_cfg.source_path,
+                "status": status,
+                "error": error_msg,
+            });
+
+            // Print with proper comma separation (no comma before first element)
+            if stream_id == 0 {
+                print!(
+                    "  {}",
+                    to_string_pretty(&result_json)?.replace('\n', "\n  ")
+                );
+            } else {
+                print!(
+                    ",\n  {}",
+                    to_string_pretty(&result_json)?.replace('\n', "\n  ")
+                );
+            }
+            // Flush stdout to ensure streaming output
+            use io::Write;
+            io::stdout().flush()?;
+        }
+    }
+
+    // Close JSON array if in JSON mode
+    if output.json {
+        println!("\n]");
+    } else {
+        output.report.info(&format!(
+            "\nVerification complete: {}/{} streams verified successfully",
+            verified_count, num_streams
+        ));
+    }
+
+    if !failed_streams.is_empty() {
+        if !output.json {
+            output
+                .report
+                .info(&format!("Failed streams: {}", failed_streams.join(", ")));
+        }
+        return Err(anyhow!(
+            "{} stream(s) failed verification",
+            failed_streams.len()
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn run_verify(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     let archive_dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap()).canonicalize()?;
+    let config = config::read_config(&archive_dir, matches)?;
+    let cache_nr_entries = (1024 * 1024 * config.data_cache_size_meg) / SLAB_SIZE_TARGET;
+
+    // Check if we're verifying all streams or just one
+    if matches.get_flag("ALL") {
+        return run_verify_all(matches, output, &archive_dir, cache_nr_entries);
+    }
+
+    // Single stream verification - require either INPUT or --internal
+    if !matches.contains_id("INPUT") && !matches.get_flag("internal") {
+        return Err(anyhow!(
+            "When using --stream, you must specify either an INPUT file/device or use --internal"
+        ));
+    }
+
+    let stream = matches
+        .get_one::<String>("STREAM")
+        .ok_or_else(|| anyhow!("--stream is required when not using --all"))?;
+
+    // Single stream verification (existing logic)
     let input_file = if matches.contains_id("INPUT") {
         let p = Path::new(matches.get_one::<String>("INPUT").unwrap());
         p.canonicalize()
@@ -770,11 +951,6 @@ pub fn run_verify(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     } else {
         PathBuf::new()
     };
-
-    let config = config::read_config(&archive_dir, matches)?;
-    let cache_nr_entries = (1024 * 1024 * config.data_cache_size_meg) / SLAB_SIZE_TARGET;
-
-    let stream = matches.get_one::<String>("STREAM").unwrap();
 
     let s_id = crate::stream_archive::parse_stream_id(stream)?;
     let stream_cfg = StreamArchive::open_read(&archive_dir)?.read_config(s_id)?;

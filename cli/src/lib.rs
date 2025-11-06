@@ -1,4 +1,4 @@
-use clap::{command, Arg, ArgAction, ArgGroup, Command, ValueHint};
+use clap::{command, Arg, ArgAction, Command, ValueHint};
 
 use std::env;
 
@@ -193,25 +193,46 @@ pub fn build_cli() -> clap::Command {
         .about("verifies stream in the archive against the original file/dev or an internal blake3 hash")
         .arg(
             Arg::new("INPUT")
-                .help("Device or file containing the correct version of the data")
+                .help("Device or file containing the correct version of the data (only valid with --stream)")
                 .value_name("INPUT")
                 .value_hint(ValueHint::FilePath)
-                .num_args(1), // not required; enforced via group below
+                .num_args(1)
+                .conflicts_with("ALL"), // INPUT not allowed with --all
         )
         .arg(
             Arg::new("internal")
                 .long("internal")
-                .help("Verify using the archive's internally stored blake3 hash (no INPUT needed)")
+                .help("Verify using the archive's internally stored blake3 hash (implied with --all)")
                 .action(ArgAction::SetTrue),
         )
-        .group(
-            ArgGroup::new("verify-source")
-                .args(["INPUT", "internal"])
-                .required(true), // must choose exactly one
+        .arg(
+            Arg::new("ALL")
+                .help("Verify all streams in the archive using internal blake3 hashes")
+                .long("all")
+                .action(ArgAction::SetTrue)
+                .help_heading("Optional Options"),
+        )
+        .arg(
+            Arg::new("REPAIR")
+                .help("Attempt to repair any errors found (requires --all)")
+                .long("repair")
+                .action(ArgAction::SetTrue)
+                .requires("ALL")
+                .conflicts_with("STREAM")
+                .help_heading("Optional Options"),
+        )
+        .arg(
+            Arg::new("FORCE")
+                .help("Skip confirmation prompt when using --repair")
+                .long("force")
+                .short('f')
+                .action(ArgAction::SetTrue)
+                .requires("REPAIR")
+                .help_heading("Optional Options"),
         )
         .arg(data_cache_size.clone())
         .arg(archive_arg.clone())
-        .arg(stream_arg.clone())
+        .arg(stream_arg.clone().required(false).conflicts_with("ALL"))
         .arg(json.clone()),
 )
         .subcommand(

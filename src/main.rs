@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use clap::ArgMatches;
 use std::process::exit;
 use std::sync::Arc;
 
@@ -23,6 +24,27 @@ where
     f(output)
 }
 
+fn repairing(subcommand_name: &str, sub_matches: &ArgMatches) -> bool {
+    subcommand_name == "verify" && sub_matches.get_flag("REPAIR")
+}
+
+fn handle_repair_mode(archive_path: &str, is_repairing: bool, force: bool) -> Result<()> {
+    match (flight_check(archive_path), is_repairing) {
+        (Ok(_), true) | (Err(_), true) => {
+            // Either way, repairing requires confirmation (unless --force is used)
+            if !force && !confirm_data_loss_warning() {
+                return Err(anyhow!("User selected to NOT confirm data loss, exiting!"));
+            }
+            Ok(())
+        }
+        (Err(e), false) => {
+            eprintln!("Archive is in an inconsistent state, try verify --all --repair");
+            Err(e)
+        }
+        (Ok(_), false) => Ok(()),
+    }
+}
+
 fn main_() -> Result<()> {
     let cli = cli::build_cli();
     let matches = cli.get_matches();
@@ -36,19 +58,13 @@ fn main_() -> Result<()> {
             // good state (skip for create command as archive doesn't exist yet)
             if subcommand_name != "create" && std::env::var("BLK_ARCHIVE_DEVEL_SKIP_DATA").is_err()
             {
-                let fc = flight_check(archive_path);
-                if fc.is_err() {
-                    if subcommand_name == "verify" && sub_matches.get_flag("REPAIR") {
-                        if !confirm_data_loss_warning() {
-                            return Err(anyhow!(
-                                "User selected to NOT confirm data loss, exiting!"
-                            ));
-                        }
-                    } else {
-                        eprintln!("Archive is in an inconsistent state, try verify --all --repair");
-                        return fc;
-                    }
-                }
+                let is_repairing = repairing(subcommand_name, sub_matches);
+                let force = if subcommand_name == "verify" {
+                    sub_matches.get_flag("FORCE")
+                } else {
+                    false
+                };
+                handle_repair_mode(archive_path, is_repairing, force)?;
             }
         }
     }

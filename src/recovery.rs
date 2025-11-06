@@ -8,10 +8,16 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::archive;
+use crate::cuckoo_filter::*;
 use crate::paths;
 use crate::slab;
+use crate::slab::builder::*;
+
+use crate::output::Output;
+use crate::paths::*;
 
 /// Extension trait for syncing the parent directory of a path
 ///
@@ -656,6 +662,110 @@ pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
         );
         return generate_warning(archive_path, &message);
     }
+
+    Ok(())
+}
+
+/// Repairs a corrupted archive by synchronizing slabs and recovering valid streams.
+/// This function implements a multi-phase repair process:
+/// 1. Synchronize data and hash slab counts (truncate larger to match smaller)
+/// 2. Regenerate all indexes and cuckoo filter
+/// 3. Copy all stream entries to a new stream data archive
+/// 4. Backup existing, rename new
+pub fn repair_archive(
+    archive_dir: &Path,
+    output: Arc<Output>,
+    cache_nr_entries: usize,
+) -> Result<()> {
+    use crate::paths;
+    use crate::slab::file;
+    use crate::slab::multi_file::MultiFile;
+
+    output.report.info("Starting archive repair...");
+
+    // Phase 1: Synchronize data and hash slab counts
+    output
+        .report
+        .info("Phase 1: Validating and Synchronizing slab counts for data and hashes");
+
+    // Before we check counts, lets make sure the index files are correct for the data slab
+    // and the hashes slab
+    let hashes_path = paths::hashes_path(archive_dir);
+    if let Err(e) = file::quick_consistency_check(&hashes_path) {
+        output
+            .report
+            .warning(&format!("Hashes slab has errors, correcting...{:?}", e));
+        let mut offsets = file::regenerate_index(&hashes_path, true)
+            .with_context(|| format!("Unable to correct the hashes index for {:?}", hashes_path))?;
+        offsets.write_offset_file(true)?;
+    }
+
+    // Check the data file, this will rebuild the indexes
+    MultiFile::quick_consistency_check(archive_dir, false)?;
+
+    // If we get here this shall not fail
+    let (_, data_slab_count) = MultiFile::total_number_slabs(archive_dir)?;
+    let hash_slab_count = file::number_of_slabs(&hashes_path)?;
+
+    // Make sure we don't have a blatent bug that is going to wipe everything
+    assert!(hash_slab_count != 0);
+    assert!(data_slab_count != 0);
+
+    output.report.info(&format!(
+        "Data slabs: {} ≠ Hash slabs: {}",
+        data_slab_count, hash_slab_count
+    ));
+
+    let min_count = std::cmp::min(data_slab_count, hash_slab_count);
+
+    if data_slab_count != hash_slab_count {
+        output
+            .report
+            .info(&format!("Truncating to {} slabs", min_count));
+
+        // Truncate the larger file to match the smaller
+        if hash_slab_count > min_count {
+            // Truncate hashes file
+            output
+                .report
+                .info("Truncating hashes file to match data slab file");
+            slab::file::truncate_to_slab_count(&hashes_path, min_count)?;
+        }
+
+        if data_slab_count > min_count {
+            // Truncate data files
+            output
+                .report
+                .info("Truncating data files to match hashes slab");
+            MultiFile::truncate_multifile_to_slab_count(archive_dir, min_count)?;
+        }
+    }
+
+    output
+        .report
+        .info("Rebuilding cuckoo filter from hashes slab");
+    let hashes_file = Arc::new(Mutex::new(SlabFileBuilder::open(&hashes_path).build()?));
+    let seen = crate::archive::build_cuckoo_from_hashes(&hashes_file, INITIAL_SIZE)?;
+    seen.write(index_path(archive_dir))?;
+
+    output
+        .report
+        .info("Phase 1 complete: Slabs synchronized and indexes rebuilt, cuckoo updated");
+
+    // Phase 2: Validate and recover streams to a stream data copy
+    output
+        .report
+        .info("Phase 2: Validating streams, retaining ones that validate");
+    crate::stream_archive::verify_and_rebuild_streams(archive_dir, true, output, cache_nr_entries)?;
+
+    // When we get here we need to update the checkpoint to reflect the new sizes
+    // TODO: We need to re-work how we create checkpoints.  I'm thinking we need a method on the
+    //       archive itself that handles this.
+    let current_data_slab =
+        MultiFile::open_for_read(archive_dir, cache_nr_entries)?.get_current_write_file_id();
+    let checkpoint_path = archive_dir.join(check_point_file());
+    let checkpoint = create_checkpoint_from_files(archive_dir, current_data_slab)?;
+    checkpoint.write(&checkpoint_path)?;
 
     Ok(())
 }

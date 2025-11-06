@@ -99,6 +99,24 @@ impl BlkArchive {
         run_ok(self.verify_cmd(input, stream))?;
         Ok(())
     }
+
+    pub fn verify_all_cmd(&self) -> Command {
+        verify_cmd(args!["-a", &self.archive, "--all"])
+    }
+
+    pub fn verify_all(&self) -> Result<()> {
+        run_ok(self.verify_all_cmd())?;
+        Ok(())
+    }
+
+    pub fn verify_all_with_repair_cmd(&self) -> Command {
+        verify_cmd(args!["-a", &self.archive, "--all", "--repair", "--force"])
+    }
+
+    pub fn verify_all_with_repair(&self) -> Result<()> {
+        run_ok(self.verify_all_with_repair_cmd())?;
+        Ok(())
+    }
 }
 
 //-----------------------------------------
