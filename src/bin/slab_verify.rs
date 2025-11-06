@@ -3,7 +3,7 @@ use blk_archive::slab::file::regenerate_index;
 use blk_archive::slab::offsets::validate_slab_offsets_file;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::fs::OpenOptions;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const FILE_MAGIC: u64 = 0xb927f96a6b611180;
@@ -33,6 +33,19 @@ struct Args {
 
     /// Dump all slab offsets to stdout
     dump_offsets: bool,
+
+    /// Corrupt a specific slab for error testing (slab_number,offset,byte_value)
+    corrupt_slab: Option<CorruptionSpec>,
+}
+
+#[derive(Debug, Clone)]
+struct CorruptionSpec {
+    /// Which slab to corrupt (0-indexed)
+    slab_number: usize,
+    /// Offset within the slab data to corrupt
+    offset: usize,
+    /// Byte value to write
+    byte_value: u8,
 }
 
 fn parse_args() -> Result<Args> {
@@ -44,6 +57,7 @@ fn parse_args() -> Result<Args> {
     let mut verbose = false;
     let mut max_slabs = 0;
     let mut dump_offsets = false;
+    let mut corrupt_slab = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -80,6 +94,12 @@ fn parse_args() -> Result<Args> {
             "-d" | "--dump-offsets" => {
                 dump_offsets = true;
             }
+            "--corrupt-slab" => {
+                let val = args
+                    .next()
+                    .ok_or_else(|| anyhow!("Missing value for --corrupt-slab"))?;
+                corrupt_slab = Some(parse_corruption_spec(&val)?);
+            }
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -103,6 +123,48 @@ fn parse_args() -> Result<Args> {
         verbose,
         max_slabs,
         dump_offsets,
+        corrupt_slab,
+    })
+}
+
+fn parse_corruption_spec(spec: &str) -> Result<CorruptionSpec> {
+    let parts: Vec<&str> = spec.split(',').collect();
+    if parts.len() != 3 {
+        return Err(anyhow!(
+            "Invalid corruption spec format. Expected: slab_number,offset,byte_value"
+        ));
+    }
+
+    let slab_number = parts[0].parse::<usize>().with_context(|| {
+        format!(
+            "Invalid slab_number: '{}'. Must be a non-negative integer",
+            parts[0]
+        )
+    })?;
+
+    let offset = parts[1].parse::<usize>().with_context(|| {
+        format!(
+            "Invalid offset: '{}'. Must be a non-negative integer",
+            parts[1]
+        )
+    })?;
+
+    let byte_value = if parts[2].starts_with("0x") || parts[2].starts_with("0X") {
+        u8::from_str_radix(&parts[2][2..], 16)
+            .with_context(|| format!("Invalid hex byte_value: '{}'. Must be 0x00-0xFF", parts[2]))?
+    } else {
+        parts[2].parse::<u8>().with_context(|| {
+            format!(
+                "Invalid byte_value: '{}'. Must be 0-255 or 0x00-0xFF",
+                parts[2]
+            )
+        })?
+    };
+
+    Ok(CorruptionSpec {
+        slab_number,
+        offset,
+        byte_value,
     })
 }
 
@@ -121,6 +183,9 @@ fn print_help() {
     println!("    -v, --verbose                     Show detailed information");
     println!("    -d, --dump-offsets                Dump all slab offsets to stdout");
     println!("    --max-slabs <N>                   Maximum slabs to verify (0 = all)");
+    println!("    --corrupt-slab <SPEC>             Corrupt a slab for error testing");
+    println!("                                      Format: slab_number,offset,byte_value");
+    println!("                                      Example: --corrupt-slab 0,10,0xFF");
     println!("    -h, --help                        Print help information");
 }
 
@@ -413,6 +478,144 @@ fn dump_offsets(offsets_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn corrupt_slab(slab_path: &Path, spec: &CorruptionSpec) -> Result<()> {
+    println!("Slab Corruption Utility");
+    println!("=======================");
+    println!("Slab file:    {:?}", slab_path);
+    println!("Slab number:  {}", spec.slab_number);
+    println!("Offset:       {} (0x{:x})", spec.offset, spec.offset);
+    println!(
+        "Byte value:   {} (0x{:02x})",
+        spec.byte_value, spec.byte_value
+    );
+    println!();
+
+    // Open file for reading and writing
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(slab_path)
+        .with_context(|| format!("Failed to open slab file: {:?}", slab_path))?;
+
+    let file_size = file.metadata()?.len();
+
+    if file_size < SLAB_FILE_HDR_LEN {
+        return Err(anyhow!(
+            "Slab file is too small ({} bytes) to contain a valid header",
+            file_size
+        ));
+    }
+
+    // Verify header
+    let magic = file.read_u64::<LittleEndian>()?;
+    let version = file.read_u32::<LittleEndian>()?;
+    let _flags = file.read_u32::<LittleEndian>()?;
+
+    if magic != FILE_MAGIC {
+        return Err(anyhow!("Invalid file magic: 0x{:016x}", magic));
+    }
+
+    if version != FORMAT_VERSION {
+        return Err(anyhow!("Unsupported format version: {}", version));
+    }
+
+    // Seek to start of slabs
+    file.seek(SeekFrom::Start(SLAB_FILE_HDR_LEN))?;
+
+    let mut current_slab = 0;
+
+    // Find the target slab
+    loop {
+        let curr_offset = file.stream_position()?;
+        if curr_offset >= file_size {
+            return Err(anyhow!(
+                "Slab {} not found (file only has {} slabs)",
+                spec.slab_number,
+                current_slab
+            ));
+        }
+
+        let remaining = file_size - curr_offset;
+        if remaining < SLAB_META_SIZE {
+            return Err(anyhow!(
+                "Slab {} not found (incomplete slab metadata at offset {})",
+                spec.slab_number,
+                curr_offset
+            ));
+        }
+
+        let magic = file.read_u64::<LittleEndian>()?;
+        let len = file.read_u64::<LittleEndian>()?;
+        let mut _checksum = [0u8; 8];
+        file.read_exact(&mut _checksum)?;
+
+        if magic != SLAB_MAGIC {
+            return Err(anyhow!(
+                "Invalid slab magic at offset {}: 0x{:016x}",
+                curr_offset,
+                magic
+            ));
+        }
+
+        if current_slab == spec.slab_number {
+            // Found the target slab
+            let slab_data_offset = file.stream_position()?;
+
+            if spec.offset >= len as usize {
+                return Err(anyhow!(
+                    "Offset {} is beyond slab data size {} bytes",
+                    spec.offset,
+                    len
+                ));
+            }
+
+            println!(
+                "Found slab {} at file offset 0x{:x}",
+                current_slab, curr_offset
+            );
+            println!("Slab data size: {} bytes", len);
+            println!("Slab data starts at file offset: 0x{:x}", slab_data_offset);
+
+            // Read the byte at the corruption offset
+            let corruption_file_offset = slab_data_offset + spec.offset as u64;
+            file.seek(SeekFrom::Start(corruption_file_offset))?;
+
+            let mut old_byte = [0u8; 1];
+            file.read_exact(&mut old_byte)?;
+
+            println!();
+            println!(
+                "Current byte at offset {}: 0x{:02x}",
+                spec.offset, old_byte[0]
+            );
+
+            // Write the corrupted byte
+            file.seek(SeekFrom::Start(corruption_file_offset))?;
+            file.write_all(&[spec.byte_value])?;
+            file.flush()?;
+
+            println!(
+                "Updated byte at offset {}: 0x{:02x}",
+                spec.offset, spec.byte_value
+            );
+            println!();
+            println!(
+                "✓ Slab {} successfully corrupted at offset {}",
+                spec.slab_number, spec.offset
+            );
+            println!("  File offset: 0x{:x}", corruption_file_offset);
+            println!("  Old value:   0x{:02x}", old_byte[0]);
+            println!("  New value:   0x{:02x}", spec.byte_value);
+
+            return Ok(());
+        }
+
+        // Skip to next slab
+        file.seek(SeekFrom::Current(len as i64))?;
+        current_slab += 1;
+    }
+}
+
 fn main() -> Result<()> {
     let args = parse_args()?;
 
@@ -420,6 +623,11 @@ fn main() -> Result<()> {
         .offsets_file
         .clone()
         .unwrap_or_else(|| offsets_path(args.slab_file.clone()));
+
+    // If corrupt_slab is specified, corrupt and exit
+    if let Some(ref spec) = args.corrupt_slab {
+        return corrupt_slab(&args.slab_file, spec);
+    }
 
     // If dump_offsets is specified, just dump and exit
     if args.dump_offsets {
