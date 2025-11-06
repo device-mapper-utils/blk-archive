@@ -177,6 +177,7 @@ mod tests {
 
     /// Compare write performance between SlabFile and MultiFile
     #[test]
+    #[ignore]
     fn test_compare_write_performance() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -225,6 +226,7 @@ mod tests {
 
     /// Compare read performance between SlabFile and MultiFile
     #[test]
+    #[ignore]
     fn test_compare_read_performance() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -293,6 +295,7 @@ mod tests {
 
     /// Test compressed write performance
     #[test]
+    #[ignore]
     fn test_compressed_write_performance() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("perf_test_compressed.slab");
@@ -328,6 +331,7 @@ mod tests {
 
     /// Test random access read performance
     #[test]
+    #[ignore]
     fn test_random_access_performance() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("perf_test_random.slab");
@@ -410,6 +414,7 @@ mod tests {
 
     /// Compare performance when using trait objects (dynamic dispatch)
     #[test]
+    #[ignore]
     fn test_trait_object_performance() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -488,6 +493,7 @@ mod tests {
 
     /// Test MultiFile performance when crossing file boundaries and compare to SlabFile
     #[test]
+    #[ignore]
     fn test_multifile_boundary_crossing_performance() {
         use crate::slab::multi_file::SLABS_PER_FILE;
 

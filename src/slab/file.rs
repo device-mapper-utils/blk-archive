@@ -154,19 +154,195 @@ pub fn number_of_slabs<P: AsRef<Path>>(data_slab: P) -> Result<u32> {
     }
 }
 
+/// Verify the checksum of the last slab in a slab file
+///
+/// This function reads the last slab (based on the last offset in the index file)
+/// and verifies its checksum matches. This is a quick way to detect if the slab
+/// file and index file are out of sync.
+///
+/// # Arguments
+///
+/// * `data_slab` - Path to the slab data file
+/// * `offsets` - SlabOffsets containing the index information
+/// * `count` - Number of slabs (from index file)
+///
+/// # Returns
+///
+/// * `Ok(())` if the last slab's checksum is valid
+/// * `Err` if the checksum is invalid or if there's an I/O error
+pub fn verify_last_slab_checksum<P: AsRef<Path>>(
+    data_slab: P,
+    offsets: &SlabOffsets,
+    count: u32,
+) -> Result<()> {
+    if count == 0 {
+        return Ok(()); // Empty file is trivially valid
+    }
+
+    let slab_path = data_slab.as_ref();
+    let last_offset = offsets
+        .get_slab_offset((count - 1) as usize)
+        .ok_or_else(|| anyhow!("Failed to read last offset from index"))?;
+
+    let mut data = OpenOptions::new()
+        .read(true)
+        .create(false)
+        .open(slab_path)
+        .with_context(|| format!("Failed to open slab file {:?}", slab_path))?;
+
+    // Seek to the last slab
+    data.seek(SeekFrom::Start(last_offset)).with_context(|| {
+        format!(
+            "Failed to seek to offset {} in {:?}",
+            last_offset, slab_path
+        )
+    })?;
+
+    // Read slab header
+    let slab_magic = data
+        .read_u64::<LittleEndian>()
+        .with_context(|| format!("Failed to read magic for last slab in {:?}", slab_path))?;
+
+    if slab_magic != SLAB_MAGIC {
+        return Err(anyhow!(
+            "Last slab in {:?} has incorrect magic: expected 0x{:016x}, got 0x{:016x}",
+            slab_path,
+            SLAB_MAGIC,
+            slab_magic
+        ));
+    }
+
+    let slab_len = data
+        .read_u64::<LittleEndian>()
+        .with_context(|| format!("Failed to read length for last slab in {:?}", slab_path))?;
+
+    if slab_len == 0 {
+        return Err(anyhow!(
+            "Last slab in {:?} has zero length (invalid)",
+            slab_path
+        ));
+    }
+
+    let mut expected_csum: Hash64 = Hash64::default();
+    data.read_exact(&mut expected_csum)
+        .with_context(|| format!("Failed to read checksum for last slab in {:?}", slab_path))?;
+
+    // Read the slab data
+    let mut buf = vec![0u8; slab_len as usize];
+    data.read_exact(&mut buf).with_context(|| {
+        format!(
+            "Failed to read {} bytes for last slab in {:?}",
+            slab_len, slab_path
+        )
+    })?;
+
+    // Verify checksum
+    let actual_csum = hash_64(&buf);
+    if actual_csum != expected_csum {
+        return Err(anyhow!(
+            "Checksum mismatch for last slab in {:?}: expected {:?}, got {:?}",
+            slab_path,
+            expected_csum,
+            actual_csum
+        ));
+    }
+
+    Ok(())
+}
+
+/// Perform a quick consistency check between a slab file and its index file
+///
+/// This function performs multiple checks to ensure the slab file and index file are consistent:
+/// 1. Validates the index file's internal CRC64 checksum
+/// 2. Checks that the last offset is within the slab file size bounds
+/// 3. Verifies the last slab's checksum matches
+///
+/// This is much faster than regenerating the entire index, while still catching
+/// most common corruption scenarios.
+///
+/// # Arguments
+///
+/// * `data_slab` - Path to the slab data file
+///
+/// # Returns
+///
+/// * `Ok(())` if all consistency checks pass
+/// * `Err` with a descriptive message if any check fails
+pub fn quick_consistency_check<P: AsRef<Path>>(data_slab: P) -> Result<()> {
+    let slab_path = data_slab.as_ref();
+    let offsets_path = offsets_path(slab_path);
+
+    // Check 1: Validate index file CRC64
+    let (valid, count, error) = validate_slab_offsets_file(&offsets_path, true);
+    if !valid {
+        return Err(anyhow!(
+            "Index file CRC validation failed for {:?}: {}",
+            offsets_path,
+            error.unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
+
+    // If empty, we're done
+    if count == 0 {
+        return Ok(());
+    }
+
+    // Check 2: Verify last offset is within file bounds
+    let offsets = SlabOffsets::open(&offsets_path, false)
+        .with_context(|| format!("Failed to open index file {:?}", offsets_path))?;
+
+    let last_offset = offsets
+        .get_slab_offset((count - 1) as usize)
+        .ok_or_else(|| anyhow!("Failed to read last offset from {:?}", offsets_path))?;
+
+    let file_size = std::fs::metadata(slab_path)
+        .with_context(|| format!("Failed to get metadata for {:?}", slab_path))?
+        .len();
+
+    // Last offset should be less than file size and should have room for at least
+    // the slab header (magic + length + checksum = 24 bytes)
+    if last_offset >= file_size {
+        return Err(anyhow!(
+            "Index/slab mismatch for {:?}: last offset {} >= file size {} - index file is out of sync",
+            slab_path,
+            last_offset,
+            file_size
+        ));
+    }
+
+    if last_offset + SLAB_HDR_LEN > file_size {
+        return Err(anyhow!(
+            "Index/slab mismatch for {:?}: last offset {} + header {} > file size {} - slab file may be truncated",
+            slab_path,
+            last_offset,
+            SLAB_HDR_LEN,
+            file_size
+        ));
+    }
+
+    // Check 3: Verify the last slab's checksum
+    verify_last_slab_checksum(slab_path, &offsets, count)
+        .with_context(|| format!("Last slab checksum verification failed for {:?}", slab_path))?;
+
+    Ok(())
+}
+
 fn writer(shared: &Shared, rx: Receiver<SlabData>, start_index: u64) {
     // FIXME: pass on error
     writer_(shared, rx, start_index).expect("write of slab failed");
 }
 
-pub fn regenerate_index<'a, P: AsRef<Path>>(data_path: P) -> Result<SlabOffsets<'a>> {
+pub fn regenerate_index<'a, P: AsRef<Path>>(
+    data_path: P,
+    truncate: bool,
+) -> Result<SlabOffsets<'a>> {
     let slab_name = data_path.as_ref().to_path_buf();
     let slab_display = slab_name.display();
     let slab_offsets_name = offsets_path(slab_name.clone());
 
     let data = OpenOptions::new()
         .read(true)
-        .write(false)
+        .write(truncate) // Need write permission if we might truncate
         .create(false)
         .open(&slab_name)?;
 
@@ -195,27 +371,229 @@ pub fn regenerate_index<'a, P: AsRef<Path>>(data_path: P) -> Result<SlabOffsets<
     }
 
     // Only after we know we have a valid slab header will we muck with the index file.
-    let mut so = SlabOffsets::open(slab_offsets_name, true)?;
+    let mut so = SlabOffsets::open(slab_offsets_name.clone(), true)?;
 
     if curr_offset == file_size {
         return Ok(so);
     }
-
-    so.append(SLAB_FILE_HDR_LEN); // The first offset for slab 0 starts at the size of the hdr
-    let mut slab_index = 0;
+    //so.append(SLAB_FILE_HDR_LEN); // The first offset for slab 0 starts at the size of the hdr
+    let mut slab_index: u32 = 0;
+    let mut last_good_offset = curr_offset;
 
     loop {
+        // Closure to handle slab reading which we'll call with error handling
+        let read_result = (|| -> Result<bool> {
+            let remaining = file_size
+                .checked_sub(curr_offset)
+                .ok_or_else(|| anyhow!("position {} beyond end {}", curr_offset, file_size))?;
+
+            if remaining < SLAB_HDR_LEN {
+                return Err(anyhow!(
+                    "{slab_display}[{slab_index}] is incomplete, not enough remaining for header, \
+                    {remaining} remaining bytes, need {SLAB_HDR_LEN}",
+                ));
+            }
+
+            let slab_magic = data.read_u64::<LittleEndian>()?;
+            let slab_len = data.read_u64::<LittleEndian>()?;
+
+            if slab_magic != SLAB_MAGIC {
+                return Err(anyhow!("{slab_display}[{slab_index}] magic incorrect"));
+            }
+
+            if slab_len == 0 {
+                return Err(anyhow!(
+                    "{slab_display}[{slab_index}] zero-length slab not allowed"
+                ));
+            }
+
+            if slab_len > (crate::archive::SLAB_SIZE_TARGET * 2) as u64 {
+                return Err(anyhow!(
+                    "{slab_display}[{slab_index}] length too large: {slab_len}"
+                ));
+            }
+
+            let mut expected_csum: Hash64 = Hash64::default();
+            data.read_exact(&mut expected_csum)
+                .with_context(|| format!("{slab_display}[{slab_index}] failed to read checksum"))?;
+
+            if remaining < SLAB_HDR_LEN + slab_len {
+                return Err(anyhow!(
+                    "{slab_display}[{slab_index}] is incomplete, payload is truncated, \
+                    needing {}, remaining {remaining}",
+                    SLAB_HDR_LEN + slab_len
+                ));
+            }
+
+            let mut buf = vec![0; slab_len as usize];
+            data.read_exact(&mut buf).with_context(|| {
+                format!(
+                    "{slab_display}[{slab_index}] error while trying to read ({slab_len} bytes)",
+                )
+            })?;
+
+            let actual_csum = hash_64(&buf);
+            if actual_csum != expected_csum {
+                return Err(anyhow!("{slab_display}[{slab_index}] checksum incorrect!"));
+            }
+
+            Ok(false) // Successfully read slab, not at EOF
+        })();
+
+        match read_result {
+            Ok(_) => {
+                so.append(curr_offset); // Append offset for next slab after successfully reading current one
+
+                curr_offset = data.stream_position()?;
+                last_good_offset = curr_offset;
+
+                if curr_offset == file_size {
+                    break;
+                }
+                slab_index += 1;
+            }
+            Err(e) => {
+                if truncate {
+                    // Truncate the file to the end of the last good slab
+                    eprintln!(
+                        "Warning: {slab_display}[{slab_index}] encountered error: {e}\n\
+                        Truncating file to {last_good_offset} bytes (end of slab {})",
+                        slab_index.saturating_sub(1)
+                    );
+
+                    // Drop buffered reader to release file handle
+                    drop(data);
+
+                    // Reopen slab file with write permission and truncate
+                    let file = OpenOptions::new()
+                        .write(true)
+                        .open(&slab_name)
+                        .with_context(|| {
+                            format!("Failed to open {} for truncation", slab_display)
+                        })?;
+
+                    file.set_len(last_good_offset).with_context(|| {
+                        format!(
+                            "Failed to truncate {} to {}",
+                            slab_display, last_good_offset
+                        )
+                    })?;
+
+                    // so already contains the correct offsets (only good slabs)
+                    // Just break and return it
+                    break;
+                } else {
+                    // Re-throw the error if not in truncate mode
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    Ok(so)
+}
+
+/// Truncate a slab file to contain exactly `slab_num` slabs and rebuild its index
+///
+/// This function:
+/// 1. Validates the slab file header
+/// 2. Reads through slabs until reaching `slab_num`
+/// 3. Truncates the file at the offset after the last desired slab
+/// 4. Rebuilds the index file (.offsets)
+///
+/// # Arguments
+/// * `data_slab` - Path to the slab data file
+/// * `slab_num` - Number of slabs to keep (0 = truncate to header only)
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err(...)` if:
+///   - The file doesn't exist or has invalid format
+///   - `slab_num` exceeds the current number of slabs
+///   - Any I/O errors occur
+pub fn truncate_to_slab_count(data_slab: &Path, slab_num: u32) -> Result<()> {
+    let slab_display = data_slab.display();
+
+    // Open file for reading to determine truncation point
+    let data = OpenOptions::new()
+        .read(true)
+        .create(false)
+        .open(data_slab)?;
+
+    let file_size = data.metadata()?.len();
+
+    if file_size < SLAB_FILE_HDR_LEN {
+        return Err(anyhow!(
+            "{slab_display} isn't large enough to be a slab file, size = {file_size} bytes."
+        ));
+    }
+
+    let mut data = BufReader::new(data);
+
+    // Validate the slab header
+    let _flags = read_slab_header(&mut data)?;
+
+    let mut curr_offset = data.stream_position()?;
+    if curr_offset != SLAB_FILE_HDR_LEN {
+        return Err(anyhow!(
+            "For slab {}, after reading header, position={} but expected {}",
+            slab_display,
+            curr_offset,
+            SLAB_FILE_HDR_LEN
+        ));
+    }
+
+    // Special case: truncate to header only (0 slabs)
+    if slab_num == 0 {
+        drop(data); // Close the reader before truncating
+        let file = OpenOptions::new()
+            .write(true)
+            .open(data_slab)
+            .with_context(|| format!("Failed to open {} for truncation", slab_display))?;
+
+        file.set_len(SLAB_FILE_HDR_LEN).with_context(|| {
+            format!(
+                "Failed to truncate {} to header size ({})",
+                slab_display, SLAB_FILE_HDR_LEN
+            )
+        })?;
+
+        // Rebuild index for empty file
+        let mut slab_offsets = regenerate_index(data_slab, false)?;
+        slab_offsets.write_offset_file(true)?;
+        return Ok(());
+    }
+
+    // Read through slabs to find truncation point
+    let mut slab_index: u32 = 0;
+    let truncate_offset: u64;
+
+    loop {
+        if slab_index >= slab_num {
+            // Found our truncation point
+            truncate_offset = curr_offset;
+            break;
+        }
+
         let remaining = file_size
             .checked_sub(curr_offset)
             .ok_or_else(|| anyhow!("position {} beyond end {}", curr_offset, file_size))?;
 
-        if remaining < SLAB_HDR_LEN {
+        if remaining == 0 {
             return Err(anyhow!(
-                "{slab_display}[{slab_index}] is incomplete, not enough remaining for header, \
-                {remaining} remaining bytes, need {SLAB_HDR_LEN}",
+                "{slab_display}: requested {} slabs but file only contains {}",
+                slab_num,
+                slab_index
             ));
         }
 
+        if remaining < SLAB_HDR_LEN {
+            return Err(anyhow!(
+                "{slab_display}[{slab_index}] is incomplete, not enough remaining for header"
+            ));
+        }
+
+        // Read slab header
         let slab_magic = data.read_u64::<LittleEndian>()?;
         let slab_len = data.read_u64::<LittleEndian>()?;
 
@@ -235,38 +613,45 @@ pub fn regenerate_index<'a, P: AsRef<Path>>(data_path: P) -> Result<SlabOffsets<
             ));
         }
 
-        let mut expected_csum: Hash64 = Hash64::default();
-        data.read_exact(&mut expected_csum)
-            .with_context(|| format!("{slab_display}[{slab_index}] failed to read checksum"))?;
+        // Skip checksum (8 bytes)
+        data.seek(SeekFrom::Current(8))?;
 
         if remaining < SLAB_HDR_LEN + slab_len {
             return Err(anyhow!(
-                "{slab_display}[{slab_index}] is incomplete, payload is truncated, \
-                needing {}, remaining {remaining}",
-                SLAB_HDR_LEN + slab_len
+                "{slab_display}[{slab_index}] is incomplete, payload is truncated"
             ));
         }
 
-        let mut buf = vec![0; slab_len as usize];
-        data.read_exact(&mut buf).with_context(|| {
-            format!("{slab_display}[{slab_index}] error while trying to read ({slab_len} bytes)",)
-        })?;
-
-        let actual_csum = hash_64(&buf);
-        if actual_csum != expected_csum {
-            return Err(anyhow!("{slab_display}[{slab_index}] checksum incorrect!"));
-        }
+        // Skip slab data
+        data.seek(SeekFrom::Current(slab_len as i64))?;
 
         curr_offset = data.stream_position()?;
-        if curr_offset == file_size {
-            break;
-        }
-
         slab_index += 1;
-        so.append(curr_offset);
     }
 
-    Ok(so)
+    // Close the reader before truncating
+    drop(data);
+
+    // Truncate the file
+    let file = OpenOptions::new()
+        .write(true)
+        .open(data_slab)
+        .with_context(|| format!("Failed to open {} for truncation", slab_display))?;
+
+    file.set_len(truncate_offset).with_context(|| {
+        format!(
+            "Failed to truncate {} to {} bytes ({} slabs)",
+            slab_display, truncate_offset, slab_num
+        )
+    })?;
+
+    drop(file);
+
+    // Rebuild the index
+    let mut slab_offsets = regenerate_index(data_slab, false)?;
+    slab_offsets.write_offset_file(true)?;
+
+    Ok(())
 }
 
 fn offsets_path<P: AsRef<Path>>(p: P) -> PathBuf {
@@ -617,7 +1002,9 @@ impl<'a> SlabFile<'a> {
         }
 
         let actual_csum = hash_64(&buf);
-        assert_eq!(actual_csum, expected_csum);
+        if actual_csum != expected_csum {
+            return Err(anyhow!("Slab {slab} has a checksum error!"));
+        }
 
         if self.compressed {
             let decompress_buff_size_mb: usize = env::var("BLK_ARCHIVE_DECOMPRESS_BUFF_SIZE_MB")

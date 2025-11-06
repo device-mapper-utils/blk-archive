@@ -3,13 +3,15 @@
 //! This module provides crash-safe checkpoint/recovery functionality to protect
 //! against data corruption when pack operations are interrupted by panics or signals.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::paths::*;
+use crate::archive;
+use crate::paths;
+use crate::slab;
 
 /// Extension trait for syncing the parent directory of a path
 ///
@@ -265,13 +267,13 @@ impl RecoveryCheckpoint {
         let archive_dir_ref = archive_dir.as_ref();
 
         // Truncate hashes file (will fail if missing)
-        let hashes_path = hashes_path(archive_dir_ref);
+        let hashes_path = paths::hashes_path(archive_dir_ref);
         let hashes_truncated = Self::truncate_file(&hashes_path, self.hashes_file_size)?;
 
         // If hashes file was truncated, regenerate its index to reflect correct slab count
         if hashes_truncated {
-            let mut hashes_index =
-                crate::slab::regenerate_index(&hashes_path).with_context(|| {
+            let mut hashes_index = crate::slab::regenerate_index(&hashes_path, false)
+                .with_context(|| {
                     format!("Failed to regenerate hashes index for {:?}", hashes_path)
                 })?;
             hashes_index.write_offset_file(true).with_context(|| {
@@ -287,8 +289,8 @@ impl RecoveryCheckpoint {
 
         // If data file was truncated, regenerate its index to reflect correct slab count
         if data_truncated {
-            let mut data_index =
-                crate::slab::regenerate_index(&current_file_path).with_context(|| {
+            let mut data_index = crate::slab::regenerate_index(&current_file_path, false)
+                .with_context(|| {
                     format!(
                         "Failed to regenerate data index for {:?}",
                         current_file_path
@@ -328,7 +330,7 @@ impl RecoveryCheckpoint {
         }
 
         // Truncate stream metadata file
-        let metadata_path = streams_metadata_path(archive_dir_ref);
+        let metadata_path = paths::streams_metadata_path(archive_dir_ref);
         if metadata_path.exists() {
             let metadata_truncated =
                 Self::truncate_file(&metadata_path, self.stream_metadata_size)?;
@@ -336,7 +338,7 @@ impl RecoveryCheckpoint {
             if metadata_truncated
                 && self.stream_metadata_size >= crate::slab::file::SLAB_FILE_HDR_LEN
             {
-                let mut metadata_index = crate::slab::regenerate_index(&metadata_path)
+                let mut metadata_index = crate::slab::regenerate_index(&metadata_path, false)
                     .with_context(|| {
                         format!(
                             "Failed to regenerate stream metadata index for {:?}",
@@ -354,7 +356,7 @@ impl RecoveryCheckpoint {
         }
 
         // Truncate stream mappings file
-        let mappings_path = stream_mappings_path(archive_dir_ref);
+        let mappings_path = paths::stream_mappings_path(archive_dir_ref);
         if mappings_path.exists() {
             let mappings_truncated =
                 Self::truncate_file(&mappings_path, self.stream_mappings_size)?;
@@ -362,7 +364,7 @@ impl RecoveryCheckpoint {
             if mappings_truncated
                 && self.stream_mappings_size >= crate::slab::file::SLAB_FILE_HDR_LEN
             {
-                let mut mappings_index = crate::slab::regenerate_index(&mappings_path)
+                let mut mappings_index = crate::slab::regenerate_index(&mappings_path, false)
                     .with_context(|| {
                         format!(
                             "Failed to regenerate stream mappings index for {:?}",
@@ -386,7 +388,7 @@ impl RecoveryCheckpoint {
     ///
     /// Fails if the file is smaller than the target size, as this indicates corruption.
     /// Returns true if the file was actually truncated (size was reduced), false otherwise.
-    fn truncate_file<P: AsRef<Path>>(path: P, size: u64) -> Result<bool> {
+    pub fn truncate_file<P: AsRef<Path>>(path: P, size: u64) -> Result<bool> {
         let path = path.as_ref();
         let file = OpenOptions::new()
             .write(true)
@@ -442,6 +444,22 @@ pub fn check_point_file() -> PathBuf {
     PathBuf::from("recovery.checkpoint")
 }
 
+pub fn confirm_data_loss_warning() -> bool {
+    // Write to stderr and stdout explicitly
+    println!("WARNING: DATA LOSS WILL OCCUR IF YOU CONTINUE");
+    println!("Press Y to continue, any other key to exit.");
+
+    // Flush to make sure messages appear before waiting for input
+    let _ = io::stdout().flush();
+
+    // Read a single line from stdin
+    let mut input = String::new();
+    matches!(
+        io::stdin().read_line(&mut input).ok().map(|_| input.trim()),
+        Some("y" | "Y")
+    )
+}
+
 /// Helper to create checkpoint from current archive state
 ///
 /// This collects metadata from all files involved in the pack operation:
@@ -452,7 +470,7 @@ pub fn create_checkpoint_from_files<P: AsRef<Path>>(
     let base_path = archive_dir.as_ref();
 
     // Get hashes file size
-    let hashes_path = hashes_path(base_path);
+    let hashes_path = paths::hashes_path(base_path);
     let hashes_file_size = std::fs::metadata(&hashes_path)
         .with_context(|| format!("Failed to get metadata for hashes file: {:?}", hashes_path))?
         .len();
@@ -465,7 +483,7 @@ pub fn create_checkpoint_from_files<P: AsRef<Path>>(
         .len();
 
     // Get stream metadata file size
-    let metadata_path = streams_metadata_path(base_path);
+    let metadata_path = paths::streams_metadata_path(base_path);
     let stream_metadata_size = if metadata_path.exists() {
         std::fs::metadata(&metadata_path)
             .with_context(|| {
@@ -480,7 +498,7 @@ pub fn create_checkpoint_from_files<P: AsRef<Path>>(
     };
 
     // Get stream mappings file size
-    let mappings_path = stream_mappings_path(base_path);
+    let mappings_path = paths::stream_mappings_path(base_path);
     let stream_mappings_size = if mappings_path.exists() {
         std::fs::metadata(&mappings_path)
             .with_context(|| {
@@ -503,100 +521,140 @@ pub fn create_checkpoint_from_files<P: AsRef<Path>>(
     })
 }
 
-/// Sync all archive files to disk
-///
-/// This should be called before creating a checkpoint to ensure all
-/// buffered data is written to disk.
-pub fn sync_archive<P: AsRef<Path>>(archive_dir: P, data_slab_file_id: u32) -> Result<()> {
-    let archive_dir_ref = archive_dir.as_ref();
-
-    // Sync hashes file
-    let hashes_path = hashes_path(archive_dir_ref);
-    if hashes_path.exists() {
-        let file = File::open(&hashes_path)
-            .with_context(|| format!("Failed to open hashes file: {:?}", hashes_path))?;
-        file.sync_all()?;
-
-        // Sync parent directory
-        hashes_path.sync_parent()?;
-    }
-
-    // Sync hashes index file (cuckoo filter - "seen")
-    let index_path = index_path(archive_dir_ref);
-    if index_path.exists() {
-        let file = File::open(&index_path)
-            .with_context(|| format!("Failed to open index file: {:?}", index_path))?;
-        file.sync_all()?;
-
-        // Sync parent directory
-        index_path.sync_parent()?;
-    }
-
-    // Sync hashes index offsets file ("seen.offsets")
-    let index_offsets_path = index_path.with_extension("offsets");
-    if index_offsets_path.exists() {
-        let file = File::open(&index_offsets_path).with_context(|| {
+pub fn apply_check_point<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
+    let checkpoint_path = archive_path
+        .as_ref()
+        .join(crate::recovery::check_point_file());
+    if RecoveryCheckpoint::exists(&checkpoint_path) {
+        let checkpoint = RecoveryCheckpoint::read(&checkpoint_path)
+            .with_context(|| format!("Read error on checkpoint from {:?}", checkpoint_path))?;
+        checkpoint.apply(archive_path.as_ref()).with_context(|| {
             format!(
-                "Failed to open index offsets file: {:?}",
-                index_offsets_path
+                "Error applying recovery checkpoint at {:?}",
+                archive_path.as_ref()
             )
         })?;
-        file.sync_all()?;
+    }
+    Ok(())
+}
 
-        // Sync parent directory
-        index_offsets_path.sync_parent()?;
+fn generate_warning<P: AsRef<std::path::Path>>(archive: P, message: &str) -> Result<()> {
+    let a = archive.as_ref();
+    Err(anyhow!(
+        "Critical error: {message}\n\
+                 To repair archive {a:?}, run: verify -a <archive> --all --repair\n\
+                 CAUTION: This will result in lost data in the archive!",
+    ))
+}
+
+/// Performs a flight check on data and hashes slab files
+///
+/// Verifies that both files have the same number of slabs. If they don't match,
+/// regenerates the index files and checks again. Returns an error if they still
+/// don't match after regeneration.
+///
+/// # Arguments
+///
+/// * `archive_path`  Path to archive
+///
+/// # Returns
+///
+/// * `Ok(())` if files have matching slab counts
+/// * `Err` if slab counts don't match after regeneration
+pub fn flight_check<P: AsRef<std::path::Path>>(archive_path: P) -> Result<()> {
+    // Make sure the archive directory actually exists
+    if !RecoveryCheckpoint::exists(&archive_path) {
+        return Err(anyhow!(format!(
+            "archive and/or checkpoint file for {:?} does not exist!",
+            archive_path.as_ref()
+        )));
     }
 
-    // Sync data slab files (MultiFile mode only - sync all files up to current file_id)
-    for file_id in 0..=data_slab_file_id {
-        let file_path = crate::slab::multi_file::file_id_to_path(archive_dir_ref, file_id);
-        let file = File::open(&file_path)
-            .with_context(|| format!("Failed to open data file: {:?}", file_path))?;
-        file.sync_all()?;
+    // Apply the checkpoint, this is a no-op if we exited cleanly
+    apply_check_point(&archive_path)?;
 
-        let offsets_path = file_path.with_extension("offsets");
-        let offsets_file = File::open(&offsets_path)
-            .with_context(|| format!("Failed to open offsets file: {:?}", offsets_path))?;
-        offsets_file.sync_all()?;
+    // Retrieve the slab counts from data slabs and hashes slab
+    let (data_slab_count, data_regen) = archive::archive_data_slab_count(&archive_path)?;
+    let (hash_slab_count, hash_regen) = archive::archive_hashes_slab_count(&archive_path)?;
 
-        // Sync parent directory
-        file_path.sync_parent()?;
-    }
+    // Check if counts match bettween the data and hashes slab
+    if data_slab_count != hash_slab_count {
+        eprintln!(
+            "WARNING: missmatch between data slab counts {} and hashes slab counts {} fixing ...",
+            data_slab_count, hash_slab_count,
+        );
 
-    // Sync stream metadata file
-    let metadata_path = streams_metadata_path(archive_dir_ref);
-    if metadata_path.exists() {
-        let file = File::open(&metadata_path)
-            .with_context(|| format!("Failed to open stream metadata file: {:?}", metadata_path))?;
-        file.sync_all()?;
-
-        let offsets_path = metadata_path.with_extension("offsets");
-        if offsets_path.exists() {
-            let offsets_file = File::open(&offsets_path).with_context(|| {
-                format!("Failed to open metadata offsets file: {:?}", offsets_path)
-            })?;
-            offsets_file.sync_all()?;
+        if !data_regen {
+            slab::MultiFile::fix_data_file_slab_indexes(&archive_path, false).with_context(
+                || {
+                    format!(
+                        "flight_check: failed to fix data file slab indexes at {:?}",
+                        archive_path.as_ref()
+                    )
+                },
+            )?;
         }
 
-        metadata_path.sync_parent()?;
-    }
-
-    // Sync stream mappings file
-    let mappings_path = stream_mappings_path(archive_dir_ref);
-    if mappings_path.exists() {
-        let file = File::open(&mappings_path)
-            .with_context(|| format!("Failed to open stream mappings file: {:?}", mappings_path))?;
-        file.sync_all()?;
-
-        let offsets_path = mappings_path.with_extension("offsets");
-        if offsets_path.exists() {
-            let offsets_file = File::open(&offsets_path).with_context(|| {
-                format!("Failed to open mappings offsets file: {:?}", offsets_path)
-            })?;
-            offsets_file.sync_all()?;
+        if !hash_regen {
+            // hashes index file has an error, fix
+            let hashes_path = paths::hashes_path(&archive_path);
+            let mut hash_index =
+                crate::slab::regenerate_index(&hashes_path, false).with_context(|| {
+                    format!(
+                        "flight_check: Failed to regenerate hashes index for {:?}",
+                        hashes_path
+                    )
+                })?;
+            hash_index.write_offset_file(true)?;
         }
 
-        mappings_path.sync_parent()?;
+        // get counts and check again
+        let (data_slab_count, _data_regen) = archive::archive_data_slab_count(&archive_path)?;
+        let (hash_slab_count, _hash_regen) = archive::archive_hashes_slab_count(&archive_path)?;
+        if data_slab_count != hash_slab_count {
+            let message = format!(
+                "The number of slabs in the \
+                 data file(s) {} doesn't match the number of slabs in the hash file {}.",
+                data_slab_count, hash_slab_count
+            );
+            return generate_warning(&archive_path, &message);
+        }
+    }
+
+    // Perform quick consistency checks on hashes file
+    let hashes_path = paths::hashes_path(&archive_path);
+    if let Err(e) = slab::quick_consistency_check(&hashes_path) {
+        eprintln!(
+            "WARNING: Hashes file consistency check failed: {}\nAttempting to regenerate index without data loss...",
+            e
+        );
+        // Try to regenerate without truncation first (no data loss)
+        match crate::slab::regenerate_index(&hashes_path, false) {
+            Ok(mut hash_index) => {
+                hash_index.write_offset_file(true)?;
+                eprintln!("Successfully regenerated hashes index without data loss");
+            }
+            Err(regen_err) => {
+                let message =
+                    format!(
+                    "Hashes file {:?} has corruption that cannot be repaired without data loss.\n\
+                     Original error: {}\n\
+                     Regeneration error: {}", hashes_path, e, regen_err);
+
+                return generate_warning(&archive_path, &message);
+            }
+        }
+    }
+
+    // Perform quick consistency checks on all data slab files
+    let mf = slab::MultiFile::quick_consistency_check(&archive_path, false);
+    if let Err(e) = mf {
+        let message = format!(
+            "Data slab has corruption that cannot be repaired without data loss.\n\
+             Error: {}",
+            e
+        );
+        return generate_warning(archive_path, &message);
     }
 
     Ok(())

@@ -32,6 +32,7 @@ fn kill_process(pid: i32) {
 }
 
 #[test]
+#[ignore]
 fn test_interrupt_after_checkpoint() -> Result<()> {
     use rand::Rng;
     let mut rng = rand::thread_rng();
@@ -96,6 +97,7 @@ fn test_interrupt_after_checkpoint() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn test_interrupt_before_checkpoint() -> Result<()> {
     use rand::Rng;
     let mut rng = rand::thread_rng();

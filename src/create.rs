@@ -158,10 +158,6 @@ fn create(
         .write(&index_path)
         .with_context(|| format!("Failed to write initial index to {:?}", index_path))?;
 
-    // Sync all files to disk before creating checkpoint
-    recovery::sync_archive(archive_dir, 0)
-        .with_context(|| format!("Failed to sync archive at {:?}", archive_dir))?;
-
     // Create initial recovery checkpoint
     let checkpoint_path = archive_dir.join(recovery::check_point_file());
     let checkpoint = recovery::create_checkpoint_from_files(archive_dir, 0)?;

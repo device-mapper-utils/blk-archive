@@ -85,8 +85,8 @@ impl SlabOffsets<'_> {
         let path = p.as_ref().to_path_buf();
         let f = OpenOptions::new()
             .read(true)
-            .write(true)
-            .create(true) // create if missing
+            .write(truncate)
+            .create(truncate) // create if missing
             .truncate(truncate)
             .open(&path)
             .with_context(|| format!("open {:?}", path))?;

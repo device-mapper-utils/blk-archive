@@ -1,34 +1,18 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::process::exit;
 use std::sync::Arc;
-use thinp::report::*;
 
-use blk_archive::archive::flight_check;
 use blk_archive::create;
 use blk_archive::dump_stream;
 use blk_archive::list;
 use blk_archive::output::Output;
 use blk_archive::pack;
+use blk_archive::recovery::{confirm_data_loss_warning, flight_check};
 use blk_archive::unpack;
 
+use blk_archive::utils::mk_output;
+
 //-----------------------
-
-fn mk_report(json: bool) -> Arc<Report> {
-    if json {
-        Arc::new(mk_quiet_report())
-    } else if atty::is(atty::Stream::Stdout) {
-        Arc::new(mk_progress_bar_report())
-    } else {
-        Arc::new(mk_simple_report())
-    }
-}
-
-fn mk_output(json: bool) -> Arc<Output> {
-    let report = mk_report(json);
-    report.set_level(LogLevel::Info);
-
-    Arc::new(Output { report, json })
-}
 
 fn with_output<F>(matches: &clap::ArgMatches, f: F) -> Result<()>
 where
@@ -52,7 +36,19 @@ fn main_() -> Result<()> {
             // good state (skip for create command as archive doesn't exist yet)
             if subcommand_name != "create" && std::env::var("BLK_ARCHIVE_DEVEL_SKIP_DATA").is_err()
             {
-                flight_check(archive_path)?;
+                let fc = flight_check(archive_path);
+                if fc.is_err() {
+                    if subcommand_name == "verify" && sub_matches.get_flag("REPAIR") {
+                        if !confirm_data_loss_warning() {
+                            return Err(anyhow!(
+                                "User selected to NOT confirm data loss, exiting!"
+                            ));
+                        }
+                    } else {
+                        eprintln!("Archive is in an inconsistent state, try verify --all --repair");
+                        return fc;
+                    }
+                }
             }
         }
     }

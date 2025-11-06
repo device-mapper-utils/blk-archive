@@ -250,7 +250,7 @@ fn too_small_for_header_errors() {
     let mut f = create_file(&path).unwrap();
     pad_bytes(&mut f, (SLAB_FILE_HDR_LEN as usize).saturating_sub(1)).unwrap();
 
-    let res = regenerate_index(&path);
+    let res = regenerate_index(&path, false);
     assert!(res.is_err(), "expected error for file smaller than header");
 }
 
@@ -263,7 +263,7 @@ fn empty_archive_ok() {
     write_valid_header(&mut f).unwrap();
     f.flush().unwrap();
 
-    let res = regenerate_index(&path);
+    let res = regenerate_index(&path, false);
     assert!(res.is_ok(), "empty archive (header only) should be OK");
     assert_eq!(res.unwrap().len(), 0);
 }
@@ -278,7 +278,7 @@ fn single_slab_ok() {
     write_slab(&mut f, b"hello world").unwrap();
     f.flush().unwrap();
 
-    let res = regenerate_index(&path);
+    let res = regenerate_index(&path, false);
     assert!(res.is_ok(), "single valid slab should parse");
     assert_eq!(res.unwrap().len(), 1);
 }
@@ -295,7 +295,7 @@ fn multiple_slabs_ok() {
     write_slab(&mut f, &[42u8; 1024]).unwrap();
     f.flush().unwrap();
 
-    let res = regenerate_index(&path);
+    let res = regenerate_index(&path, false);
     assert!(res.is_ok(), "multiple valid slabs should parse");
     assert_eq!(res.unwrap().len(), 3);
 }
@@ -317,7 +317,7 @@ fn bad_magic_errors() {
     f.write_all(&[0u8; 5]).unwrap();
     f.flush().unwrap();
 
-    let err = regenerate_index(&path).unwrap_err();
+    let err = regenerate_index(&path, false).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("magic incorrect"),
@@ -342,7 +342,7 @@ fn excessive_length_errors() {
     // Don't need to write payload; function should reject length before reading.
     f.flush().unwrap();
 
-    let err = regenerate_index(&path).unwrap_err();
+    let err = regenerate_index(&path, false).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("length too large"),
@@ -372,7 +372,7 @@ fn truncated_payload_errors() {
     f.write_all(&full_payload[..20]).unwrap();
     f.flush().unwrap();
 
-    let err = regenerate_index(&path).unwrap_err();
+    let err = regenerate_index(&path, false).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("truncated") || msg.contains("incomplete"),
@@ -400,7 +400,7 @@ fn checksum_mismatch_errors() {
     f.write_all(payload).unwrap();
     f.flush().unwrap();
 
-    let err = regenerate_index(&path).unwrap_err();
+    let err = regenerate_index(&path, false).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("checksum"),
@@ -422,10 +422,196 @@ fn zero_length_slab_errors() {
     f.write_all(&bogus).unwrap();
     f.flush().unwrap();
 
-    let err = regenerate_index(&path).unwrap_err();
+    let err = regenerate_index(&path, false).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("zero-length"),
         "expected zero-length error, got: {msg}"
     );
+}
+
+#[test]
+fn truncate_to_slab_count_basic() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("truncate.slab");
+
+    // Create a file with 5 slabs
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    let payloads: Vec<Vec<u8>> = vec![
+        vec![1; 100],
+        vec![2; 200],
+        vec![3; 300],
+        vec![4; 400],
+        vec![5; 500],
+    ];
+
+    for payload in &payloads {
+        write_slab(&mut f, payload).unwrap();
+    }
+    f.flush().unwrap();
+    drop(f);
+
+    // Generate initial index
+    let mut offsets = regenerate_index(&path, false).unwrap();
+    offsets.write_offset_file(true).unwrap();
+    drop(offsets);
+
+    // Verify we have 5 slabs
+    assert_eq!(number_of_slabs(&path).unwrap(), 5);
+
+    // Truncate to 3 slabs
+    truncate_to_slab_count(&path, 3).unwrap();
+
+    // Verify we now have 3 slabs
+    assert_eq!(number_of_slabs(&path).unwrap(), 3);
+
+    // Verify we can read the first 3 slabs
+    let mut slab = SlabFileBuilder::open(&path).build().unwrap();
+    for i in 0..3 {
+        let data = slab.read(i).unwrap();
+        assert_eq!(*data, payloads[i as usize]);
+    }
+
+    // Verify we can't read slab 3 (should be gone)
+    let result = slab.read(3);
+    assert!(result.is_err());
+}
+
+#[test]
+fn truncate_to_zero_slabs() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("truncate-zero.slab");
+
+    // Create a file with 3 slabs
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    for i in 1..=3 {
+        write_slab(&mut f, &vec![i; 100]).unwrap();
+    }
+    f.flush().unwrap();
+    drop(f);
+
+    // Generate initial index
+    let mut offsets = regenerate_index(&path, false).unwrap();
+    offsets.write_offset_file(true).unwrap();
+    drop(offsets);
+
+    // Verify we have 3 slabs
+    assert_eq!(number_of_slabs(&path).unwrap(), 3);
+
+    // Truncate to 0 slabs (header only)
+    truncate_to_slab_count(&path, 0).unwrap();
+
+    // Verify we now have 0 slabs
+    assert_eq!(number_of_slabs(&path).unwrap(), 0);
+
+    // Verify file size is just the header
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert_eq!(metadata.len(), SLAB_FILE_HDR_LEN);
+}
+
+#[test]
+fn truncate_to_slab_count_too_many() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("truncate-too-many.slab");
+
+    // Create a file with 3 slabs
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    for i in 1..=3 {
+        write_slab(&mut f, &vec![i; 100]).unwrap();
+    }
+    f.flush().unwrap();
+    drop(f);
+
+    // Generate initial index
+    let mut offsets = regenerate_index(&path, false).unwrap();
+    offsets.write_offset_file(true).unwrap();
+    drop(offsets);
+
+    // Try to truncate to 5 slabs (more than available)
+    let result = truncate_to_slab_count(&path, 5);
+    assert!(result.is_err());
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        msg.contains("only contains 3"),
+        "expected error about insufficient slabs, got: {msg}"
+    );
+
+    // Verify file still has 3 slabs (wasn't modified)
+    assert_eq!(number_of_slabs(&path).unwrap(), 3);
+}
+
+#[test]
+fn truncate_to_same_count() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("truncate-same.slab");
+
+    // Create a file with 4 slabs
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    for i in 1..=4 {
+        write_slab(&mut f, &vec![i; 100]).unwrap();
+    }
+    f.flush().unwrap();
+    drop(f);
+
+    // Generate initial index
+    let mut offsets = regenerate_index(&path, false).unwrap();
+    offsets.write_offset_file(true).unwrap();
+    drop(offsets);
+
+    let original_size = std::fs::metadata(&path).unwrap().len();
+
+    // Truncate to same count (4 slabs)
+    truncate_to_slab_count(&path, 4).unwrap();
+
+    // Verify we still have 4 slabs
+    assert_eq!(number_of_slabs(&path).unwrap(), 4);
+
+    // Verify file size is unchanged
+    let new_size = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(original_size, new_size);
+}
+
+#[test]
+fn truncate_rebuilds_index() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("truncate-index.slab");
+    let index_path = td.path().join("truncate-index.offsets");
+
+    // Create a file with 5 slabs
+    let mut f = create_file(&path).unwrap();
+    write_valid_header(&mut f).unwrap();
+
+    for i in 1u8..=5 {
+        write_slab(&mut f, &vec![i; 100 * i as usize]).unwrap();
+    }
+    f.flush().unwrap();
+    drop(f);
+
+    // Build initial index
+    let mut offsets = regenerate_index(&path, false).unwrap();
+    offsets.write_offset_file(true).unwrap();
+    drop(offsets);
+
+    let original_index_size = std::fs::metadata(&index_path).unwrap().len();
+
+    // Truncate to 2 slabs
+    truncate_to_slab_count(&path, 2).unwrap();
+
+    // Verify index was rebuilt and is smaller
+    let new_index_size = std::fs::metadata(&index_path).unwrap().len();
+    assert!(
+        new_index_size < original_index_size,
+        "Index should be smaller after truncation"
+    );
+
+    // Verify index is valid and has correct count
+    assert_eq!(number_of_slabs(&path).unwrap(), 2);
 }

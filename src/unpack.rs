@@ -25,6 +25,7 @@ use crate::stream;
 use crate::stream::*;
 use crate::stream_archive::StreamArchive;
 use crate::thin_metadata::*;
+use crate::utils::error_chain_string;
 use crate::utils::unmapped_digest_add;
 
 //-----------------------------------------
@@ -133,7 +134,13 @@ impl<D: UnpackDest, S: SlabStorage, SF: StreamData + 'static> Unpacker<D, S, SF>
             let nr_entries = entries.len();
 
             for (i, e) in entries.iter().enumerate() {
-                self.unpack_entry(e)?;
+                let unpack_result: std::result::Result<(), anyhow::Error> = self.unpack_entry(e);
+                if let Err(unpack_error) = unpack_result {
+                    return Err(anyhow!(
+                        "error while unpacking an entry {e:?} from the stream, {}",
+                        error_chain_string(&unpack_error)
+                    ));
+                }
 
                 if i % 1024 == 0 {
                     // update progress bar
