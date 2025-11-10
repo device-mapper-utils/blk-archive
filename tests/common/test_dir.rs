@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use rand::prelude::*;
-use std::fs;
 use std::path::PathBuf;
+use std::{env, fs};
 
 //---------------------------------------
 
@@ -15,8 +15,12 @@ pub struct TestDir {
 fn mk_dir(prefix: &str) -> Result<PathBuf> {
     for _n in 0..100 {
         let mut p = PathBuf::new();
+
+        let base_dir: String = env::var("TMPDIR").unwrap_or("/tmp".to_string());
+        p.push(base_dir);
+
         let nr = rand::thread_rng().gen_range(1000000..9999999);
-        p.push(format!("./{}_{}", prefix, nr));
+        p = p.join(format!("{}_{}", prefix, nr));
         if let Ok(()) = fs::create_dir(&p) {
             return Ok(p);
         }

@@ -7,11 +7,9 @@ use serde_json::to_string_pretty;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::output::Output;
-use crate::slab::builder::*;
 use crate::slab::*;
 use crate::stack::*;
 
@@ -887,25 +885,27 @@ fn unpack_instructions(buf: &[u8]) -> Result<Vec<MapInstruction>> {
 
 //-----------------------------------------
 
-pub struct StreamIter {
-    file: SlabFile,
+pub struct StreamIter<'a, S: StreamData> {
+    file: S,
     slab: u32,
     entries: Vec<MapEntry>,
     index: usize,
+    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
-impl StreamIter {
-    pub fn new(mut file: SlabFile) -> Result<Self> {
+impl<'a, S: StreamData> StreamIter<'a, S> {
+    pub fn new(mut file: S) -> Result<Self> {
         let entries = Self::read_slab(&mut file, 0)?;
         Ok(Self {
             file,
             slab: 0,
             entries,
             index: 0,
+            _phantom: std::marker::PhantomData,
         })
     }
 
-    fn read_slab(file: &mut SlabFile, slab: u32) -> Result<Vec<MapEntry>> {
+    fn read_slab(file: &mut S, slab: u32) -> Result<Vec<MapEntry>> {
         let buf = file.read(slab)?;
         let (entries, _positions) = unpack(&buf)?;
         Ok(entries)
@@ -924,7 +924,7 @@ impl StreamIter {
     }
 }
 
-impl Iterator for StreamIter {
+impl<'a, S: StreamData> Iterator for StreamIter<'a, S> {
     type Item = Result<MapEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -979,19 +979,20 @@ struct Stats {
     partial: u64,
 }
 
-pub struct Dumper {
-    stream_file: SlabFile,
+pub struct Dumper<S: StreamData> {
+    stream_file: S,
     vm_state: VMState,
     stats: Stats,
 }
 
-impl Dumper {
-    // Assumes current directory is the root of the archive.
-    pub fn new(stream: &str) -> Result<Self> {
-        let stream_path: PathBuf = ["streams", stream, "stream"].iter().collect();
-        let stream_file = SlabFileBuilder::open(stream_path).build()?;
+impl<S: StreamData> Dumper<S> {
+    pub fn new(
+        archive_dir: &std::path::Path,
+        stream: &str,
+    ) -> Result<Dumper<Box<dyn StreamData + Send + Sync + 'static>>> {
+        let stream_file = crate::stream_archive::open_stream(archive_dir, stream)?;
 
-        Ok(Self {
+        Ok(Dumper {
             stream_file,
             vm_state: VMState::default(),
             stats: Stats::default(),
@@ -1116,14 +1117,14 @@ impl Dumper {
 
         match instr {
             Rot { index } => {
-                format!("   rot {}", index)
+                format!("   rot {index}")
             }
             Dup { index } => {
-                format!("   dup {}", index)
+                format!("   dup {index}")
             }
 
             SetFill { byte } => {
-                format!("set-fill {}", byte)
+                format!("set-fill {byte}")
             }
             Fill8 { len } => {
                 format!("   fill {} ({})", len, self.vm_state.fill)
@@ -1139,64 +1140,64 @@ impl Dumper {
             }
 
             Unmapped8 { len } => {
-                format!("   unmap {}", len)
+                format!("   unmap {len}")
             }
             Unmapped16 { len } => {
-                format!("   unmap {}", len)
+                format!("   unmap {len}")
             }
             Unmapped32 { len } => {
-                format!("   unmap {}", len)
+                format!("   unmap {len}")
             }
             Unmapped64 { len } => {
-                format!("   unmap {}", len)
+                format!("   unmap {len}")
             }
 
             Slab16 { slab } => {
-                format!("   s.set {}", slab)
+                format!("   s.set {slab}")
             }
             Slab32 { slab } => {
-                format!("   s.set {}", slab)
+                format!("   s.set {slab}")
             }
             SlabDelta4 { delta } => {
-                format!("   s.add {}", delta)
+                format!("   s.add {delta}")
             }
             SlabDelta12 { delta } => {
-                format!("   s.add {}", delta)
+                format!("   s.add {delta}")
             }
             NextSlab => "   next".to_string(),
             Offset4 { offset } => {
-                format!("   o.set {}", offset)
+                format!("   o.set {offset}")
             }
             Offset12 { offset } => {
-                format!("   o.set {}", offset)
+                format!("   o.set {offset}")
             }
             Offset20 { offset } => {
-                format!("   o.set {}", offset)
+                format!("   o.set {offset}")
             }
             OffsetDelta4 { delta } => {
-                format!("   o.add {}", delta)
+                format!("   o.add {delta}")
             }
             OffsetDelta12 { delta } => {
-                format!("   o.add {}", delta)
+                format!("   o.add {delta}")
             }
             Emit4 { len } => {
-                format!("   emit {}", len)
+                format!("   emit {len}")
             }
             Emit12 { len } => {
-                format!("   emit {}", len)
+                format!("   emit {len}")
             }
             Emit20 { len } => {
-                format!("   emit {:<10}", len)
+                format!("   emit {len:<10}")
             }
             Pos32 { pos } => {
-                format!("   pos {:<10}", pos)
+                format!("   pos {pos:<10}")
             }
             Pos64 { pos } => {
-                format!("   pos {:<10}", pos)
+                format!("   pos {pos:<10}")
             }
             Partial { begin, end } => {
-                let str = format!("{}..{}", begin, end);
-                format!("   part {:<10}", str)
+                let str = format!("{begin}..{end}");
+                format!("   part {str:<10}")
             }
         }
     }
@@ -1307,7 +1308,7 @@ impl Dumper {
         } else {
             println!("\n\nInstruction frequencies:\n");
             for (instr, count) in stats {
-                println!("    {:>15} {:<10}", instr, count);
+                println!("    {instr:>15} {count:<10}");
             }
         }
 

@@ -6,7 +6,7 @@ use std::io::Cursor;
 
 #[derive(Debug, Clone)]
 pub enum Pattern {
-    LCG,                // Linear Congruence Generator (default)
+    Lcg,                // Linear Congruence Generator (default)
     SingleByte(u8),     // Fill with a single byte value
     Repeating(Vec<u8>), // Fill with a repeating byte pattern
 }
@@ -36,7 +36,7 @@ impl Generator {
 
     pub fn fill_buffer(&mut self, seed: u64, bytes: &mut [u8]) -> Result<()> {
         match &self.pattern {
-            Pattern::LCG => {
+            Pattern::Lcg => {
                 self.x = seed;
                 assert!(bytes.len() % 8 == 0);
                 let nr_words = bytes.len() / 8;
@@ -62,7 +62,7 @@ impl Generator {
 
     pub fn verify_buffer(&mut self, seed: u64, bytes: &[u8]) -> Result<bool> {
         match &self.pattern {
-            Pattern::LCG => {
+            Pattern::Lcg => {
                 self.x = seed;
                 assert!(bytes.len() % 8 == 0);
                 let nr_words = bytes.len() / 8;
@@ -98,7 +98,7 @@ impl Generator {
 
 impl Default for Generator {
     fn default() -> Self {
-        Self::new(Pattern::LCG)
+        Self::new(Pattern::Lcg)
     }
 }
 
