@@ -3,6 +3,7 @@ use std::process::exit;
 use std::sync::Arc;
 use thinp::report::*;
 
+use blk_archive::archive::flight_check;
 use blk_archive::create;
 use blk_archive::dump_stream;
 use blk_archive::list;
@@ -41,6 +42,20 @@ where
 fn main_() -> Result<()> {
     let cli = cli::build_cli();
     let matches = cli.get_matches();
+
+    // Check for and apply recovery checkpoint before processing any command
+    // This handles interrupted operations by truncating files to last known-good state
+    // and cleaning up indexs, cuckoo filters etc.
+    if let Some((subcommand_name, sub_matches)) = matches.subcommand() {
+        if let Some(archive_path) = sub_matches.get_one::<String>("ARCHIVE") {
+            // Do a preflight check before proceeding to ensure the archive is in a hopefully
+            // good state (skip for create command as archive doesn't exist yet)
+            if subcommand_name != "create" && std::env::var("BLK_ARCHIVE_DEVEL_SKIP_DATA").is_err()
+            {
+                flight_check(archive_path)?;
+            }
+        }
+    }
 
     match matches.subcommand() {
         Some(("create", sub_matches)) => {
