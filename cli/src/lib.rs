@@ -119,37 +119,51 @@ pub fn build_cli() -> clap::Command {
                 .about("packs a stream into the archive")
                 .arg(
                     Arg::new("INPUT")
-                        .help("Specify a device or file to archive")
+                        .help("Specify one or more devices or files to archive (only one INPUT allowed with --delta-stream/--delta-device)")
                         .required(true)
                         .value_name("INPUT")
-                        .num_args(1)
+                        .num_args(1..)
                         .help_heading("Required Options"),
                 )
                 .arg(archive_arg.clone())
                 .arg(
                     Arg::new("DELTA_STREAM")
                         .help(
-                            "Specify the stream that contains an older version of this thin device",
+                            "Specify the stream that contains an older version of this thin device (requires --delta-device, only single INPUT allowed)",
                         )
                         .required(false)
                         .long("delta-stream")
                         .value_name("DELTA_STREAM")
                         .num_args(1)
+                        .requires("DELTA_DEVICE")
                         .help_heading("Optional Options"),
                 )
                 .arg(
                     Arg::new("DELTA_DEVICE")
                         .help(
-                            "Specify the device that contains an older version of this thin device",
+                            "Specify the device that contains an older version of this thin device (requires --delta-stream, only single INPUT allowed)",
                         )
                         .required(false)
                         .long("delta-device")
                         .value_name("DELTA_DEVICE")
                         .num_args(1)
+                        .requires("DELTA_STREAM")
                         .help_heading("Optional Options"),
                 )
                 .arg(data_cache_size.clone())
-                .arg(json.clone()),
+                .arg(json.clone())
+                .arg(
+                    Arg::new("SYNC_POINT_SECS")
+                        .help("Number of seconds before creating a sync point in the archive. Smaller \
+                              values allow you to restart a pack with less data needing to be added to \
+                              archive at the cost of slower pack times")
+                        .required(false)
+                        .long("sync-point-secs")
+                        .value_name("SYNC_POINT_SECS")
+                        .num_args(1)
+                        .default_value("15")
+                        .value_parser(clap::value_parser!(u64).range(1..)),
+                ),
         )
         .subcommand(
             Command::new("unpack")
