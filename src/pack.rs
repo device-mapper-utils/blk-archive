@@ -268,6 +268,7 @@ struct Packer {
     thin_id: Option<u32>,
     hash_cache_size_meg: usize,
     sync_point_secs: u64,
+    stream_hash: StreamHash,
 }
 
 impl Packer {
@@ -284,6 +285,7 @@ impl Packer {
         thin_id: Option<u32>,
         hash_cache_size_meg: usize,
         sync_point_secs: u64,
+        stream_hash: StreamHash,
     ) -> Self {
         Self {
             output,
@@ -297,6 +299,7 @@ impl Packer {
             thin_id,
             hash_cache_size_meg,
             sync_point_secs,
+            stream_hash,
         }
     }
 
@@ -347,7 +350,7 @@ impl Packer {
         self.output.report.progress(0);
         let start_time: DateTime<Utc> = Utc::now();
 
-        let mut input_digest = new_stream_hasher();
+        let mut input_digest = new_stream_hasher(self.stream_hash);
 
         let mut offset = 0u64;
         let mut total_read = 0u64;
@@ -544,6 +547,7 @@ fn thick_packer(
         thin_id,
         config.hash_cache_size_meg,
         sync_point_secs,
+        config.stream_hash,
     ))
 }
 
@@ -590,6 +594,7 @@ fn thin_packer(
         thin_id,
         config.hash_cache_size_meg,
         sync_point_secs,
+        config.stream_hash,
     ))
 }
 
@@ -658,6 +663,7 @@ fn thin_delta_packer(
         thin_id,
         config.hash_cache_size_meg,
         sync_point_secs,
+        config.stream_hash,
     ))
 }
 
@@ -717,6 +723,9 @@ pub fn run(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
 
     let sync_point_secs = *matches.get_one::<u64>("SYNC_POINT_SECS").unwrap_or(&15u64);
     let config = config::read_config(&archive_dir, matches)?;
+
+    // Initialize block hash functions based on config
+    init_block_hashes(config.block_hash);
 
     // Check that multiple inputs are not allowed with delta mode
     let delta_args = get_delta_args(matches)?;

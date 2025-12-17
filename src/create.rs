@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thinp::report::*;
 
-use crate::cuckoo_filter::*;
+use crate::hash::{BlockHash, StreamHash};
 use crate::paths;
 use crate::paths::*;
 use crate::recovery;
 use crate::slab::{builder::*, MultiFile};
 use crate::stream_archive;
 use crate::{config::*, cuckoo_filter};
+use crate::{cuckoo_filter::*, hash};
 
 //-----------------------------------------
 
@@ -31,6 +32,8 @@ fn write_config(
     block_size: usize,
     hash_cache_size_meg: usize,
     data_cache_size_meg: usize,
+    block_hash: BlockHash,
+    stream_hash: StreamHash,
 ) -> Result<()> {
     let mut p = PathBuf::new();
     p.push(root);
@@ -49,6 +52,8 @@ fn write_config(
         splitter_alg: "RollingHashV0".to_string(),
         hash_cache_size_meg,
         data_cache_size_meg,
+        block_hash,
+        stream_hash,
     };
 
     write!(output, "{}", &serde_yaml_ng::to_string(&config).unwrap())
@@ -97,7 +102,12 @@ fn create(
     block_size: usize,
     hash_cache_size_meg: usize,
     data_cache_size_meg: usize,
+    block_hash: BlockHash,
+    stream_hash: StreamHash,
 ) -> Result<()> {
+    // We need to initialize the hash functions as soon as we know them
+    hash::init_block_hashes(block_hash);
+
     fs::create_dir_all(archive_dir)
         .with_context(|| format!("Unable to create archive {:?}", archive_dir))?;
 
@@ -106,6 +116,8 @@ fn create(
         block_size,
         hash_cache_size_meg,
         data_cache_size_meg,
+        block_hash,
+        stream_hash,
     )?;
     create_sub_dir(archive_dir, "data")?;
     create_sub_dir(archive_dir, "streams")?;
@@ -154,15 +166,21 @@ pub struct CreateParmeters {
     pub block_size: usize,
     pub hash_cache_size_meg: usize,
     pub data_cache_size_meg: usize,
+    pub block_hash: BlockHash,
+    pub stream_hash: StreamHash,
 }
 
 pub fn default(dir: &Path) -> Result<CreateParmeters> {
-    create(dir, true, 4096, 1024, 1024)?;
+    let block_hash = BlockHash::default();
+    let stream_hash = StreamHash::default();
+    create(dir, true, 4096, 1024, 1024, block_hash, stream_hash)?;
     Ok(CreateParmeters {
         data_compression: true,
         block_size: 4096,
         hash_cache_size_meg: 1024,
         data_cache_size_meg: 1024,
+        block_hash,
+        stream_hash,
     })
 }
 
@@ -179,12 +197,25 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
     let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
     let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
 
+    // Parse hash algorithm selections
+    let block_hash_str = matches.get_one::<String>("BLOCK_HASH").unwrap();
+    let block_hash = block_hash_str
+        .parse::<BlockHash>()
+        .map_err(|e| anyhow!("Invalid block hash: {}", e))?;
+
+    let stream_hash_str = matches.get_one::<String>("STREAM_HASH").unwrap();
+    let stream_hash = stream_hash_str
+        .parse::<StreamHash>()
+        .map_err(|e| anyhow!("Invalid stream hash: {}", e))?;
+
     create(
         archive_dir,
         data_compression,
         block_size,
         hash_cache_size_meg,
         data_cache_size_meg,
+        block_hash,
+        stream_hash,
     )
 }
 

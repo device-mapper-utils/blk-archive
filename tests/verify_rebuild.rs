@@ -2,6 +2,7 @@ use anyhow::Result;
 
 mod common;
 
+use blk_archive::config;
 use blk_archive::stream_archive::StreamArchive;
 use common::fixture::*;
 use common::random::Pattern;
@@ -34,6 +35,9 @@ fn test_verify_rebuild_with_corrupted_middle_stream() -> Result<()> {
     archive.verify(&input3, &response3.stream_id)?;
 
     // Get stream metadata before corruption
+    let dummy_matches = clap::ArgMatches::default();
+    let _ = config::read_config(archive.archive_path(), &dummy_matches)?;
+
     let stream_archive = StreamArchive::open_read(archive.archive_path())?;
     assert_eq!(stream_archive.stream_count(), 3, "Should have 3 streams");
 

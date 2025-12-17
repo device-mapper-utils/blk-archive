@@ -1,42 +1,76 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use chrono::prelude::*;
 use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use crate::hash::{self, BlockHash, StreamHash};
 
 //-----------------------------------------
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Config {
     pub block_size: usize,
     pub splitter_alg: String,
     pub hash_cache_size_meg: usize,
     pub data_cache_size_meg: usize,
+    #[serde(default)]
+    pub block_hash: BlockHash,
+    #[serde(default)]
+    pub stream_hash: StreamHash,
 }
 
-fn numeric_override<T: std::str::FromStr>(matches: &ArgMatches, name: &str) -> Result<Option<T>> {
+const DEFAULT_DATA_CACHE_SIZE_MEG: usize = 1024;
+
+fn numeric_override<T>(matches: &ArgMatches, name: &str, default: T) -> T
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
     match matches.try_get_one::<String>(name) {
-        Ok(Some(s)) => s
-            .parse::<T>()
-            .map_err(|_| anyhow!("could not parse {} argument", name))
-            .map(|n| Some(n)),
-        Ok(None) => Ok(None),
-        Err(_) => Err(anyhow!("Error retrieving {} argument", name)),
+        Ok(Some(s)) => match s.parse::<T>() {
+            Ok(v) => v,
+            Err(_) => {
+                // Parsing failed – fall back to default.
+                default
+            }
+        },
+        Ok(None) => {
+            // Argument not supplied.
+            default
+        }
+        Err(_) => {
+            // Retrieval error (unlikely with clap, but handled for completeness).
+            default
+        }
     }
 }
 
-pub fn read_config<P: AsRef<Path>>(root: P, overrides: &ArgMatches) -> Result<Config> {
-    let mut p = PathBuf::new();
-    p.push(root);
-    p.push("dm-archive.yaml");
-    let input = fs::read_to_string(p).context("couldn't read config file")?;
+pub fn read_config<P>(root: P, overrides: &ArgMatches) -> Result<Config>
+where
+    P: AsRef<Path>,
+{
+    // Build the full path to the yaml file.
+    let config_path = root.as_ref().join("dm-archive.yaml");
+
+    // Read and deserialize the file.
+    let input = fs::read_to_string(&config_path)
+        .with_context(|| format!("couldn't read config file `{}`", config_path.display()))?;
     let mut config: Config =
         serde_yaml_ng::from_str(&input).context("couldn't parse config file")?;
 
-    if let Some(data_cache_meg) = numeric_override::<usize>(overrides, "DATA_CACHE_SIZE_MEG")? {
-        config.data_cache_size_meg = data_cache_meg;
-    }
+    // Initialise hash functions, we need to do this as soon as we know what they are
+    // as we have lots of code that needs the hashing functions.
+    hash::init_block_hashes(config.block_hash);
+
+    let cache_size = numeric_override::<usize>(
+        overrides,
+        "DATA_CACHE_SIZE_MEG",
+        DEFAULT_DATA_CACHE_SIZE_MEG,
+    );
+    config.data_cache_size_meg = cache_size;
+
     Ok(config)
 }
 

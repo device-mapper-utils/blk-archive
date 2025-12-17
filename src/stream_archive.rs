@@ -338,6 +338,11 @@ pub fn verify_and_rebuild_streams(
 ) -> Result<usize> {
     use std::fs;
 
+    // Read config to get stream hash algorithm
+    // Note: We create a dummy ArgMatches since this is called from recovery
+    let dummy_matches = clap::ArgMatches::default();
+    let archive_config = crate::config::read_config(archive_dir, &dummy_matches)?;
+
     // Open the existing stream archive for reading
     let source_archive =
         StreamArchive::open_read(archive_dir).context("Failed to open source stream archive")?;
@@ -410,6 +415,7 @@ pub fn verify_and_rebuild_streams(
             report_output.clone(),
             config.mapped_size,
             num_cache_entries,
+            archive_config.stream_hash,
         );
 
         match stream_result {
@@ -551,7 +557,6 @@ pub fn verify_and_rebuild_streams(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -560,9 +565,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let archive_dir = temp_dir.path();
 
-        // Create the streams directory structure
+        // Create a config file
+        crate::create::default(archive_dir).unwrap();
+
+        // Create the streams directory structure (already created by default())
         let streams_dir = archive_dir.join("streams");
-        fs::create_dir_all(&streams_dir).unwrap();
 
         // Create empty stream files
         let metadata_path = streams_dir.join("metadata");

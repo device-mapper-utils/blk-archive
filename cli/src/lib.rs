@@ -112,6 +112,28 @@ pub fn build_cli() -> clap::Command {
                         .default_value("y")
                         .action(ArgAction::Set)
                         .help_heading("Optional Options"),
+                )
+                .arg(
+                    Arg::new("BLOCK_HASH")
+                        .help("Hash algorithm for block-level deduplication")
+                        .required(false)
+                        .long("block-hash")
+                        .value_name("BLOCK_HASH")
+                        .num_args(1)
+                        .value_parser(["blake2b-256", "blake3-256", "xxhash3-128", "murmur3-128"])
+                        .default_value("blake2b-256")
+                        .help_heading("Optional Options"),
+                )
+                .arg(
+                    Arg::new("STREAM_HASH")
+                        .help("Hash algorithm for stream integrity verification")
+                        .required(false)
+                        .long("stream-hash")
+                        .value_name("STREAM_HASH")
+                        .num_args(1)
+                        .value_parser(["blake3-256", "xxhash3-128", "murmur3-128"])
+                        .default_value("blake3-256")
+                        .help_heading("Optional Options"),
                 ),
         )
         .subcommand(

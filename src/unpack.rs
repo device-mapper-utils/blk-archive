@@ -222,21 +222,16 @@ impl<W: Write> UnpackDest for ThickDest<W> {
     }
 
     fn complete(&mut self) -> Result<String> {
-        let hasher = std::mem::replace(&mut self.digest, new_stream_hasher());
+        let hasher = std::mem::replace(
+            &mut self.digest,
+            new_stream_hasher(crate::hash::StreamHash::default()),
+        );
         Ok(hasher.finalize_hex())
     }
 }
 
 struct ValidateStream {
     digest: Box<dyn StreamHasher>,
-}
-
-impl Default for ValidateStream {
-    fn default() -> Self {
-        ValidateStream {
-            digest: new_stream_hasher(),
-        }
-    }
 }
 
 impl ValidateStream {
@@ -264,7 +259,10 @@ impl UnpackDest for ValidateStream {
     }
 
     fn complete(&mut self) -> Result<String> {
-        let hasher = std::mem::replace(&mut self.digest, new_stream_hasher());
+        let hasher = std::mem::replace(
+            &mut self.digest,
+            new_stream_hasher(crate::hash::StreamHash::default()),
+        );
         Ok(hasher.finalize_hex())
     }
 }
@@ -447,7 +445,10 @@ impl UnpackDest for ThinDest {
     fn complete(&mut self) -> Result<String> {
         assert!(self.run.is_none());
         assert!(self.provisioned.next().is_none());
-        let hasher = std::mem::replace(&mut self.digest, new_stream_hasher());
+        let hasher = std::mem::replace(
+            &mut self.digest,
+            new_stream_hasher(crate::hash::StreamHash::default()),
+        );
         Ok(hasher.finalize_hex())
     }
 }
@@ -489,7 +490,7 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
 
         let dest = ThickDest {
             output,
-            digest: new_stream_hasher(),
+            digest: new_stream_hasher(config.stream_hash),
         };
         let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
         u.unpack(report_output, stream_cfg.size)
@@ -519,14 +520,14 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
                 provisioned,
                 run: None,
                 writes_avoided: 0,
-                digest: new_stream_hasher(),
+                digest: new_stream_hasher(config.stream_hash),
             };
             let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
             u.unpack(report_output, stream_size)
         } else {
             let dest = ThickDest {
                 output,
-                digest: new_stream_hasher(),
+                digest: new_stream_hasher(config.stream_hash),
             };
             let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
             u.unpack(report_output, stream_size)
@@ -542,13 +543,14 @@ pub fn run_verify_stream(
     report_output: Arc<Output>,
     ouput_size: u64,
     cache_nr_entries: usize,
+    stream_hash: crate::hash::StreamHash,
 ) -> Result<String> {
     report_output.report.set_title(&format!(
         "Validating {stream_id} with stored blake3 hash ..."
     ));
 
     let dest = ValidateStream {
-        digest: new_stream_hasher(),
+        digest: new_stream_hasher(stream_hash),
     };
     let mut u = Unpacker::new(archive_dir, stream_id, cache_nr_entries, dest)
         .with_context(|| format!("unpacker::new({archive_dir:?},{stream_id},{cache_nr_entries}"))?;
@@ -566,13 +568,16 @@ struct VerifyDest {
 }
 
 impl VerifyDest {
-    fn new(input_it: Box<dyn Iterator<Item = Result<Chunk>>>) -> Self {
+    fn new(
+        input_it: Box<dyn Iterator<Item = Result<Chunk>>>,
+        stream_hash: crate::hash::StreamHash,
+    ) -> Self {
         Self {
             input_it,
             chunk: None,
             chunk_offset: 0,
             total_verified: 0,
-            digest: new_stream_hasher(),
+            digest: new_stream_hasher(stream_hash),
         }
     }
 }
@@ -717,17 +722,20 @@ impl UnpackDest for VerifyDest {
             return Err(anyhow!("archived stream is too short"));
         }
 
-        let hasher = std::mem::replace(&mut self.digest, new_stream_hasher());
+        let hasher = std::mem::replace(
+            &mut self.digest,
+            new_stream_hasher(crate::hash::StreamHash::default()),
+        );
         Ok(hasher.finalize_hex())
     }
 }
 
-fn thick_verifier(input_file: &Path) -> Result<VerifyDest> {
+fn thick_verifier(input_file: &Path, stream_hash: crate::hash::StreamHash) -> Result<VerifyDest> {
     let input_it = Box::new(ThickChunker::new(input_file, 16 * 1024 * 1024)?);
-    Ok(VerifyDest::new(input_it))
+    Ok(VerifyDest::new(input_it, stream_hash))
 }
 
-fn thin_verifier(input_file: &Path) -> Result<VerifyDest> {
+fn thin_verifier(input_file: &Path, stream_hash: crate::hash::StreamHash) -> Result<VerifyDest> {
     let input = OpenOptions::new()
         .read(true)
         .write(false)
@@ -747,7 +755,7 @@ fn thin_verifier(input_file: &Path) -> Result<VerifyDest> {
         mappings.data_block_size as u64 * 512,
     ));
 
-    Ok(VerifyDest::new(input_it))
+    Ok(VerifyDest::new(input_it, stream_hash))
 }
 
 fn run_verify_device_or_file(
@@ -757,6 +765,7 @@ fn run_verify_device_or_file(
     stream_id: &str,
     cache_nr_entries: usize,
     size: u64,
+    stream_hash: crate::hash::StreamHash,
 ) -> Result<String> {
     output.report.set_title(&format!(
         "Verifying {} and {} match ...",
@@ -765,9 +774,9 @@ fn run_verify_device_or_file(
     ));
 
     let dest = if is_thin_device(&input_file)? {
-        thin_verifier(&input_file)?
+        thin_verifier(&input_file, stream_hash)?
     } else {
-        thick_verifier(&input_file)?
+        thick_verifier(&input_file, stream_hash)?
     };
 
     let mut u = Unpacker::new(archive_dir, stream_id, cache_nr_entries, dest)?;
@@ -802,6 +811,9 @@ fn run_verify_all(
     if repair {
         return recovery::repair_archive(archive_dir, output, cache_nr_entries);
     }
+
+    // Read config to get stream hash algorithm
+    let config = config::read_config(archive_dir, matches)?;
 
     // --all always uses internal verification
     // Open stream archive to get all streams
@@ -850,6 +862,7 @@ fn run_verify_all(
             stream_output,
             stream_cfg.size,
             cache_nr_entries,
+            config.stream_hash,
         );
 
         let (status, error_msg) = match result {
@@ -979,6 +992,7 @@ pub fn run_verify(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
             output,
             stream_cfg.size,
             cache_nr_entries,
+            config.stream_hash,
         )?
     } else {
         run_verify_device_or_file(
@@ -988,6 +1002,7 @@ pub fn run_verify(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
             stream,
             cache_nr_entries,
             stream_cfg.size,
+            config.stream_hash,
         )?
     };
 
