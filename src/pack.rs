@@ -228,7 +228,7 @@ fn read_positional(file: &File, buf: &mut [u8], pos: u64) -> io::Result<usize> {
 /// Returns the number of bytes actually hashed (could be < len if EOF reached).
 pub fn hash_region(
     file: &mut File,
-    hasher: &mut blake3::Hasher,
+    hasher: &mut Box<dyn StreamHasher>,
     offset: u64,
     len: u64,
 ) -> Result<u64> {
@@ -347,7 +347,7 @@ impl Packer {
         self.output.report.progress(0);
         let start_time: DateTime<Utc> = Utc::now();
 
-        let mut input_digest = blake3::Hasher::new();
+        let mut input_digest = new_stream_hasher();
 
         let mut offset = 0u64;
         let mut total_read = 0u64;
@@ -369,7 +369,7 @@ impl Packer {
                 }
                 Chunk::Unmapped(len) => {
                     assert!(len > 0);
-                    blake3_update_zeros(&mut input_digest, len);
+                    input_digest.update_zeros(len);
                     offset += len;
                     splitter.next_break(&mut handler)?;
                     handler.handle_gap(len)?;
@@ -415,7 +415,7 @@ impl Packer {
             .complete()
             .context("error while completing the stream mappings")?;
 
-        let input_hex_digest = input_digest.finalize().to_hex().to_string();
+        let input_hex_digest = input_digest.finalize_hex();
 
         // Get mapping slab range for this stream
         let (first_mapping_slab, num_mapping_slabs) = handler.get_mapping_slab_range();

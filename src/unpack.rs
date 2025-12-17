@@ -16,7 +16,7 @@ use crate::archive;
 use crate::archive::SLAB_SIZE_TARGET;
 use crate::chunkers::*;
 use crate::config;
-use crate::hash::blake3_update_zeros;
+use crate::hash::{new_stream_hasher, StreamHasher};
 use crate::output::Output;
 use crate::paths::*;
 use crate::recovery;
@@ -186,10 +186,15 @@ impl<D: UnpackDest, S: SlabStorage, SF: StreamData + 'static> Unpacker<D, S, SF>
 
 struct ThickDest<W: Write> {
     output: W,
-    digest: blake3::Hasher,
+    digest: Box<dyn StreamHasher>,
 }
 
-fn write_bytes<W: Write>(w: &mut W, byte: u8, len: u64, digest: &mut blake3::Hasher) -> Result<()> {
+fn write_bytes<W: Write>(
+    w: &mut W,
+    byte: u8,
+    len: u64,
+    digest: &mut Box<dyn StreamHasher>,
+) -> Result<()> {
     let buf_size = std::cmp::min(len, 64 * 1024 * 1024);
     let buf = vec![byte; buf_size as usize];
 
@@ -217,13 +222,21 @@ impl<W: Write> UnpackDest for ThickDest<W> {
     }
 
     fn complete(&mut self) -> Result<String> {
-        Ok(self.digest.finalize().to_hex().to_string())
+        let hasher = std::mem::replace(&mut self.digest, new_stream_hasher());
+        Ok(hasher.finalize_hex())
     }
 }
 
-#[derive(Default)]
 struct ValidateStream {
-    digest: blake3::Hasher,
+    digest: Box<dyn StreamHasher>,
+}
+
+impl Default for ValidateStream {
+    fn default() -> Self {
+        ValidateStream {
+            digest: new_stream_hasher(),
+        }
+    }
 }
 
 impl ValidateStream {
@@ -251,7 +264,8 @@ impl UnpackDest for ValidateStream {
     }
 
     fn complete(&mut self) -> Result<String> {
-        Ok(self.digest.finalize().to_hex().to_string())
+        let hasher = std::mem::replace(&mut self.digest, new_stream_hasher());
+        Ok(hasher.finalize_hex())
     }
 }
 
@@ -275,7 +289,7 @@ struct ThinDest {
     // (provisioned, len bytes)
     run: Option<(bool, u64)>,
     writes_avoided: u64,
-    digest: blake3::Hasher,
+    digest: Box<dyn StreamHasher>,
 }
 
 impl ThinDest {
@@ -416,7 +430,7 @@ impl UnpackDest for ThinDest {
         while remaining > 0 {
             let (provisioned, c_len) = self.next_run(remaining)?;
 
-            blake3_update_zeros(&mut self.digest, c_len);
+            self.digest.update_zeros(c_len);
 
             if provisioned {
                 self.handle_unmapped_provisioned(c_len)?;
@@ -433,7 +447,8 @@ impl UnpackDest for ThinDest {
     fn complete(&mut self) -> Result<String> {
         assert!(self.run.is_none());
         assert!(self.provisioned.next().is_none());
-        Ok(self.digest.finalize().to_hex().to_string())
+        let hasher = std::mem::replace(&mut self.digest, new_stream_hasher());
+        Ok(hasher.finalize_hex())
     }
 }
 
@@ -474,7 +489,7 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
 
         let dest = ThickDest {
             output,
-            digest: blake3::Hasher::new(),
+            digest: new_stream_hasher(),
         };
         let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
         u.unpack(report_output, stream_cfg.size)
@@ -504,14 +519,14 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
                 provisioned,
                 run: None,
                 writes_avoided: 0,
-                digest: blake3::Hasher::new(),
+                digest: new_stream_hasher(),
             };
             let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
             u.unpack(report_output, stream_size)
         } else {
             let dest = ThickDest {
                 output,
-                digest: blake3::Hasher::new(),
+                digest: new_stream_hasher(),
             };
             let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
             u.unpack(report_output, stream_size)
@@ -533,7 +548,7 @@ pub fn run_verify_stream(
     ));
 
     let dest = ValidateStream {
-        digest: blake3::Hasher::new(),
+        digest: new_stream_hasher(),
     };
     let mut u = Unpacker::new(archive_dir, stream_id, cache_nr_entries, dest)
         .with_context(|| format!("unpacker::new({archive_dir:?},{stream_id},{cache_nr_entries}"))?;
@@ -547,7 +562,7 @@ struct VerifyDest {
     chunk: Option<Chunk>,
     chunk_offset: u64,
     total_verified: u64,
-    digest: blake3::Hasher,
+    digest: Box<dyn StreamHasher>,
 }
 
 impl VerifyDest {
@@ -557,7 +572,7 @@ impl VerifyDest {
             chunk: None,
             chunk_offset: 0,
             total_verified: 0,
-            digest: blake3::Hasher::new(),
+            digest: new_stream_hasher(),
         }
     }
 }
@@ -691,7 +706,7 @@ impl UnpackDest for VerifyDest {
             remaining -= len;
         }
 
-        blake3_update_zeros(&mut self.digest, len);
+        self.digest.update_zeros(len);
 
         self.total_verified += len;
         Ok(())
@@ -702,7 +717,8 @@ impl UnpackDest for VerifyDest {
             return Err(anyhow!("archived stream is too short"));
         }
 
-        Ok(self.digest.finalize().to_hex().to_string())
+        let hasher = std::mem::replace(&mut self.digest, new_stream_hasher());
+        Ok(hasher.finalize_hex())
     }
 }
 

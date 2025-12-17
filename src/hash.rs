@@ -94,6 +94,79 @@ pub fn blake3_update_zeros(hasher: &mut blake3::Hasher, len: u64) {
 }
 
 //-----------------------------------------
+// Stream Hasher Trait - Abstraction for stream integrity verification
+//-----------------------------------------
+
+/// Trait for hashing entire input sources with stream integrity verification.
+/// Provides abstraction over different hash algorithms that can be used for
+/// verifying the integrity of archived streams.
+///
+/// This trait uses dynamic dispatch to allow runtime selection of hash algorithms.
+pub trait StreamHasher {
+    /// Update the hash with the given data.
+    fn update(&mut self, data: &[u8]);
+
+    /// Finalize the hash and return as a hex string.
+    /// Consumes the hasher.
+    fn finalize_hex(self: Box<Self>) -> String;
+
+    /// Update the hash with zeros efficiently without allocating large buffers.
+    /// Used when hashing thin-provisioned devices with unmapped regions.
+    fn update_zeros(&mut self, len: u64);
+}
+
+/// Blake3 implementation of StreamHasher.
+/// Provides cryptographic hashing for stream integrity verification using the BLAKE3 algorithm.
+pub struct Blake3StreamHasher {
+    hasher: blake3::Hasher,
+}
+
+impl Blake3StreamHasher {
+    /// Create a new Blake3StreamHasher wrapped in a Box for dynamic dispatch.
+    pub fn boxed() -> Box<dyn StreamHasher> {
+        Box::new(Blake3StreamHasher {
+            hasher: blake3::Hasher::new(),
+        })
+    }
+}
+
+/// Factory function to create the default stream hasher.
+/// This centralizes the choice of hash algorithm, making it easy to switch
+/// implementations or make the choice configurable in the future.
+pub fn new_stream_hasher() -> Box<dyn StreamHasher> {
+    Blake3StreamHasher::boxed()
+}
+
+impl Default for Blake3StreamHasher {
+    fn default() -> Self {
+        Blake3StreamHasher {
+            hasher: blake3::Hasher::new(),
+        }
+    }
+}
+
+impl StreamHasher for Blake3StreamHasher {
+    fn update(&mut self, data: &[u8]) {
+        self.hasher.update(data);
+    }
+
+    fn finalize_hex(self: Box<Self>) -> String {
+        self.hasher.finalize().to_hex().to_string()
+    }
+
+    fn update_zeros(&mut self, len: u64) {
+        const ZERO_BUF: [u8; 4096] = [0; 4096];
+
+        let mut remaining = len;
+        while remaining > 0 {
+            let hash_len = std::cmp::min(ZERO_BUF.len() as u64, remaining);
+            self.hasher.update(&ZERO_BUF[0..hash_len as usize]);
+            remaining -= hash_len;
+        }
+    }
+}
+
+//-----------------------------------------
 #[cfg(test)]
 mod hash_tests {
 
@@ -257,6 +330,88 @@ mod hash_tests {
             &result[..],
             EXPECTED_HASH,
             "BLAKE hash differs from canonical reference on big-endian host"
+        );
+    }
+
+    #[test]
+    fn test_stream_hasher_trait_basic() {
+        // Test that the StreamHasher trait works with Blake3StreamHasher
+        let mut hasher = new_stream_hasher();
+
+        let test_data = b"Hello, World!";
+        hasher.update(test_data);
+
+        let result = hasher.finalize_hex();
+
+        // Verify it produces a valid hex string of expected length (64 chars for 32 bytes)
+        assert_eq!(result.len(), 64, "Blake3 hash should be 64 hex characters");
+        assert!(
+            result.chars().all(|c| c.is_ascii_hexdigit()),
+            "Result should be valid hex"
+        );
+
+        // Verify consistency: same input produces same output
+        let mut hasher2 = new_stream_hasher();
+        hasher2.update(test_data);
+        let result2 = hasher2.finalize_hex();
+        assert_eq!(result, result2, "Same input should produce same hash");
+    }
+
+    #[test]
+    fn test_stream_hasher_update_zeros() {
+        // Test that update_zeros produces the same result as updating with actual zeros
+        let mut hasher1 = new_stream_hasher();
+        hasher1.update_zeros(1024);
+        let result1 = hasher1.finalize_hex();
+
+        let mut hasher2 = new_stream_hasher();
+        let zeros = vec![0u8; 1024];
+        hasher2.update(&zeros);
+        let result2 = hasher2.finalize_hex();
+
+        assert_eq!(
+            result1, result2,
+            "update_zeros should produce same hash as update with zeros"
+        );
+    }
+
+    #[test]
+    fn test_stream_hasher_incremental() {
+        // Test that incremental updates work correctly
+        let mut hasher1 = new_stream_hasher();
+        hasher1.update(b"Hello, ");
+        hasher1.update(b"World!");
+        let result1 = hasher1.finalize_hex();
+
+        let mut hasher2 = new_stream_hasher();
+        hasher2.update(b"Hello, World!");
+        let result2 = hasher2.finalize_hex();
+
+        assert_eq!(
+            result1, result2,
+            "Incremental updates should produce same hash as single update"
+        );
+    }
+
+    #[test]
+    fn test_stream_hasher_dynamic_dispatch() {
+        // Test that dynamic dispatch works correctly
+        fn hash_with_trait(data: &[u8]) -> String {
+            let mut hasher: Box<dyn StreamHasher> = new_stream_hasher();
+            hasher.update(data);
+            hasher.finalize_hex()
+        }
+
+        let test_data = b"Dynamic dispatch test";
+        let result1 = hash_with_trait(test_data);
+
+        let mut hasher = new_stream_hasher();
+        hasher.update(test_data);
+        let result2 = hasher.finalize_hex();
+
+        assert_eq!(
+            result1, result2,
+            "Dynamic dispatch should produce same hash"
         );
     }
 }
