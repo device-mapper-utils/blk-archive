@@ -24,17 +24,6 @@ pub fn is_pow2(v: usize) -> bool {
     v != 0 && ((v & (v - 1)) == 0)
 }
 
-pub fn unmapped_digest_add(hasher: &mut blake3::Hasher, len: u64) {
-    let buf = [0; 4096];
-
-    let mut remaining = len;
-    while remaining > 0 {
-        let hash_len = std::cmp::min(buf.len() as u64, remaining);
-        hasher.update(&buf[0..hash_len as usize]);
-        remaining -= hash_len;
-    }
-}
-
 pub fn error_chain_string(err: &anyhow::Error) -> String {
     let mut s = err.to_string();
     for cause in err.chain().skip(1) {

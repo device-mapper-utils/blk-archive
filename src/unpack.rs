@@ -16,6 +16,7 @@ use crate::archive;
 use crate::archive::SLAB_SIZE_TARGET;
 use crate::chunkers::*;
 use crate::config;
+use crate::hash::blake3_update_zeros;
 use crate::output::Output;
 use crate::paths::*;
 use crate::recovery;
@@ -27,7 +28,6 @@ use crate::stream::*;
 use crate::stream_archive::StreamArchive;
 use crate::thin_metadata::*;
 use crate::utils::error_chain_string;
-use crate::utils::unmapped_digest_add;
 
 //-----------------------------------------
 
@@ -416,7 +416,7 @@ impl UnpackDest for ThinDest {
         while remaining > 0 {
             let (provisioned, c_len) = self.next_run(remaining)?;
 
-            unmapped_digest_add(&mut self.digest, c_len);
+            blake3_update_zeros(&mut self.digest, c_len);
 
             if provisioned {
                 self.handle_unmapped_provisioned(c_len)?;
@@ -691,7 +691,7 @@ impl UnpackDest for VerifyDest {
             remaining -= len;
         }
 
-        unmapped_digest_add(&mut self.digest, len);
+        blake3_update_zeros(&mut self.digest, len);
 
         self.total_verified += len;
         Ok(())

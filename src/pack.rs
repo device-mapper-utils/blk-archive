@@ -32,7 +32,6 @@ use crate::stream_archive::{
 use crate::stream_builders::*;
 use crate::stream_metadata::serialize_stream_config;
 use crate::thin_metadata::*;
-use crate::utils::unmapped_digest_add;
 
 //-----------------------------------------
 
@@ -370,7 +369,7 @@ impl Packer {
                 }
                 Chunk::Unmapped(len) => {
                     assert!(len > 0);
-                    unmapped_digest_add(&mut input_digest, len);
+                    blake3_update_zeros(&mut input_digest, len);
                     offset += len;
                     splitter.next_break(&mut handler)?;
                     handler.handle_gap(len)?;

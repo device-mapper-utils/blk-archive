@@ -4,6 +4,8 @@ use std::convert::TryInto;
 use crate::iovec::*;
 
 //-----------------------------------------
+// Blake2b - Used for content-based deduplication
+//-----------------------------------------
 
 type Blake2b32 = Blake2b<generic_array::typenum::U4>;
 type Blake2b64 = Blake2b<generic_array::typenum::U8>;
@@ -62,6 +64,33 @@ pub fn hash_le_u64(h: &[u8]) -> u64 {
             .try_into()
             .expect("hash_64 must return at least 8 bytes"),
     )
+}
+
+//-----------------------------------------
+// Blake3 - Used for stream integrity verification
+//-----------------------------------------
+
+/// Re-export Blake3 hasher for convenience
+pub use blake3::Hasher as Blake3Hasher;
+
+/// Helper function to finalize a Blake3 hash and convert to hex string.
+/// This is a common pattern used throughout the codebase for stream verification.
+pub fn blake3_finalize_hex(hasher: blake3::Hasher) -> String {
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Add unmapped (zero-filled) region to a Blake3 hash.
+/// This efficiently hashes zero bytes without allocating large buffers.
+/// Used when hashing thin-provisioned devices with unmapped regions.
+pub fn blake3_update_zeros(hasher: &mut blake3::Hasher, len: u64) {
+    const ZERO_BUF: [u8; 4096] = [0; 4096];
+
+    let mut remaining = len;
+    while remaining > 0 {
+        let hash_len = std::cmp::min(ZERO_BUF.len() as u64, remaining);
+        hasher.update(&ZERO_BUF[0..hash_len as usize]);
+        remaining -= hash_len;
+    }
 }
 
 //-----------------------------------------
