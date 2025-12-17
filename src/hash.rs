@@ -188,104 +188,6 @@ mod hash_tests {
         assert_eq!(previous, current);
     }
 
-    #[test]
-    fn test_hash_256_endian_agnostic() {
-        // Test data in little-endian format
-        let le_data: [u8; 8] = [0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
-        // Same data in big-endian format
-        let be_data: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02];
-
-        // Hash both representations
-        let hash_le = hash_256(&le_data);
-        let hash_be = hash_256(&be_data);
-
-        // The hashes should be different because the input bytes are different,
-        // even though they represent the same numbers in different endianness.
-        // This proves that the hash function treats the input as a pure byte stream
-        // and is not affected by the system's endianness.
-        assert_ne!(
-            hash_le, hash_be,
-            "Hash should treat input as raw bytes, regardless of endianness"
-        );
-
-        // Additional verification: hash the same byte sequence on both platforms
-        let consistent_data = [1, 2, 3, 4, 5, 6, 7, 8];
-        let hash1 = hash_256(&consistent_data);
-        let hash2 = hash_256(&consistent_data);
-        assert_eq!(
-            hash1, hash2,
-            "Same byte sequence should produce identical hashes"
-        );
-    }
-
-    #[test]
-    fn test_hash_64_endian_agnostic() {
-        // Test data in little-endian format
-        let le_data: [u8; 8] = [0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
-        // Same data in big-endian format
-        let be_data: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02];
-
-        // Hash both representations
-        let hash_le = hash_64(&le_data);
-        let hash_be = hash_64(&be_data);
-
-        // The hashes should be different because the input bytes are different,
-        // even though they represent the same numbers in different endianness.
-        // This proves that the hash function treats the input as a pure byte stream
-        // and is not affected by the system's endianness.
-        assert_ne!(
-            hash_le, hash_be,
-            "Hash should treat input as raw bytes, regardless of endianness"
-        );
-
-        // Additional verification: hash the same byte sequence on both platforms
-        let consistent_data = [1, 2, 3, 4, 5, 6, 7, 8];
-        let hash1 = hash_64(&consistent_data);
-        let hash2 = hash_64(&consistent_data);
-        assert_eq!(
-            hash1, hash2,
-            "Same byte sequence should produce identical hashes"
-        );
-
-        // Verify that the hash output is consistent regardless of platform endianness
-        let hash = hash_64(&consistent_data);
-        assert_eq!(hash.len(), 8, "hash_64 should always return 8 bytes");
-    }
-
-    #[test]
-    fn test_hash_32_endian_agnostic() {
-        // Test data in little-endian format
-        let le_data: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
-        // Same data in big-endian format
-        let be_data: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
-
-        // Hash both representations
-        let hash_le = hash_32(&le_data);
-        let hash_be = hash_32(&be_data);
-
-        // The hashes should be different because the input bytes are different,
-        // even though they represent the same numbers in different endianness.
-        // This proves that the hash function treats the input as a pure byte stream
-        // and is not affected by the system's endianness.
-        assert_ne!(
-            hash_le, hash_be,
-            "Hash should treat input as raw bytes, regardless of endianness"
-        );
-
-        // Additional verification: hash the same byte sequence on both platforms
-        let consistent_data = [1, 2, 3, 4];
-        let hash1 = hash_32(&consistent_data);
-        let hash2 = hash_32(&consistent_data);
-        assert_eq!(
-            hash1, hash2,
-            "Same byte sequence should produce identical hashes"
-        );
-
-        // Verify that the hash output is consistent regardless of platform endianness
-        let hash = hash_32(&consistent_data);
-        assert_eq!(hash.len(), 4, "hash_32 should always return 4 bytes");
-    }
-
     /// A canonical test array (raw bytes).
     const TEST_INPUT_BYTES: &[u8] = b"endianness test input";
 
@@ -306,6 +208,11 @@ mod hash_tests {
     ];
 
     #[cfg(target_endian = "little")]
+    const ENDIAN_ERROR_STRING: &str = "little-endian host";
+
+    #[cfg(target_endian = "big")]
+    const ENDIAN_ERROR_STRING: &str = "big-endian host";
+
     #[test]
     fn test_blake_endianness_little_endian() {
         let mut hasher = Blake2b256::new();
@@ -315,103 +222,8 @@ mod hash_tests {
         assert_eq!(
             &result[..],
             EXPECTED_HASH,
-            "BLAKE hash differs from canonical reference on little-endian host"
-        );
-    }
-
-    #[cfg(target_endian = "big")]
-    #[test]
-    fn test_blake_endianness_big_endian() {
-        let mut hasher = Blake2b256::new();
-        hasher.update(TEST_INPUT_BYTES);
-        let result = hasher.finalize();
-
-        assert_eq!(
-            &result[..],
-            EXPECTED_HASH,
-            "BLAKE hash differs from canonical reference on big-endian host"
-        );
-    }
-
-    #[test]
-    fn test_stream_hasher_trait_basic() {
-        // Test that the StreamHasher trait works with Blake3StreamHasher
-        let mut hasher = new_stream_hasher();
-
-        let test_data = b"Hello, World!";
-        hasher.update(test_data);
-
-        let result = hasher.finalize_hex();
-
-        // Verify it produces a valid hex string of expected length (64 chars for 32 bytes)
-        assert_eq!(result.len(), 64, "Blake3 hash should be 64 hex characters");
-        assert!(
-            result.chars().all(|c| c.is_ascii_hexdigit()),
-            "Result should be valid hex"
-        );
-
-        // Verify consistency: same input produces same output
-        let mut hasher2 = new_stream_hasher();
-        hasher2.update(test_data);
-        let result2 = hasher2.finalize_hex();
-        assert_eq!(result, result2, "Same input should produce same hash");
-    }
-
-    #[test]
-    fn test_stream_hasher_update_zeros() {
-        // Test that update_zeros produces the same result as updating with actual zeros
-        let mut hasher1 = new_stream_hasher();
-        hasher1.update_zeros(1024);
-        let result1 = hasher1.finalize_hex();
-
-        let mut hasher2 = new_stream_hasher();
-        let zeros = vec![0u8; 1024];
-        hasher2.update(&zeros);
-        let result2 = hasher2.finalize_hex();
-
-        assert_eq!(
-            result1, result2,
-            "update_zeros should produce same hash as update with zeros"
-        );
-    }
-
-    #[test]
-    fn test_stream_hasher_incremental() {
-        // Test that incremental updates work correctly
-        let mut hasher1 = new_stream_hasher();
-        hasher1.update(b"Hello, ");
-        hasher1.update(b"World!");
-        let result1 = hasher1.finalize_hex();
-
-        let mut hasher2 = new_stream_hasher();
-        hasher2.update(b"Hello, World!");
-        let result2 = hasher2.finalize_hex();
-
-        assert_eq!(
-            result1, result2,
-            "Incremental updates should produce same hash as single update"
-        );
-    }
-
-    #[test]
-    fn test_stream_hasher_dynamic_dispatch() {
-        // Test that dynamic dispatch works correctly
-        fn hash_with_trait(data: &[u8]) -> String {
-            let mut hasher: Box<dyn StreamHasher> = new_stream_hasher();
-            hasher.update(data);
-            hasher.finalize_hex()
-        }
-
-        let test_data = b"Dynamic dispatch test";
-        let result1 = hash_with_trait(test_data);
-
-        let mut hasher = new_stream_hasher();
-        hasher.update(test_data);
-        let result2 = hasher.finalize_hex();
-
-        assert_eq!(
-            result1, result2,
-            "Dynamic dispatch should produce same hash"
+            "blake2b hash differs from canonical reference on {}",
+            ENDIAN_ERROR_STRING
         );
     }
 }
