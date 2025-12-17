@@ -636,7 +636,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
-    fn fill_random(vec: &mut Vec<u8>) {
+    fn fill_random(vec: &mut [u8]) {
         let mut rng = rand::thread_rng();
         for byte in vec.iter_mut() {
             *byte = rng.gen();
@@ -669,7 +669,7 @@ mod tests {
 
         let data_file = MultiFile::open_for_write(archive_path, 10, slab_capacity)?;
         let hashes_file = Arc::new(Mutex::new(
-            SlabFileBuilder::open(paths::hashes_path(&archive_path))
+            SlabFileBuilder::open(paths::hashes_path(archive_path))
                 .write(true)
                 .queue_depth(16)
                 .build()
@@ -697,8 +697,7 @@ mod tests {
             for _ in 0..blocks_per_slab {
                 // We need to data random so it doesn't get de-duped
                 fill_random(&mut test_data);
-                let mut iov = IoVec::new();
-                iov.push(&test_data);
+                let iov: IoVec = vec![&test_data[..]];
                 let h = crate::hash::hash_256(&test_data);
                 archive.data_add_with_boundary_check(h, &iov, test_data.len() as u64)?;
             }
@@ -781,7 +780,7 @@ mod tests {
 
         let data_file = MultiFile::open_for_write(archive_path, 10, slab_capacity)?;
         let hashes_file = Arc::new(Mutex::new(
-            SlabFileBuilder::open(paths::hashes_path(&archive_path))
+            SlabFileBuilder::open(paths::hashes_path(archive_path))
                 .write(true)
                 .queue_depth(16)
                 .build()
@@ -801,7 +800,7 @@ mod tests {
         // 2. New file gets created
         // 3. CRASH occurs before checkpoint is written
 
-        let file1_path = file_id_to_path(&archive_path, 1);
+        let file1_path = file_id_to_path(archive_path, 1);
         std::fs::write(&file1_path, b"corrupt data that should be deleted")?;
         let mut file1_offsets = file1_path.clone();
         file1_offsets.set_extension("offsets");
@@ -875,7 +874,7 @@ mod tests {
         // Create the data and hashes files
         let data_file = MultiFile::open_for_write(archive_path, 10, slab_capacity)?;
         let hashes_file = Arc::new(Mutex::new(
-            SlabFileBuilder::open(paths::hashes_path(&archive_path))
+            SlabFileBuilder::open(paths::hashes_path(archive_path))
                 .write(true)
                 .queue_depth(16)
                 .build()
@@ -904,8 +903,7 @@ mod tests {
             let hash = crate::hash::hash_256(&data);
             test_hashes.push(hash);
 
-            let mut iov = IoVec::new();
-            iov.push(&data);
+            let iov: IoVec = vec![&data[..]];
             archive.data_add(hash, &iov, data.len() as u64)?;
         }
 

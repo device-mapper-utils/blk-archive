@@ -681,7 +681,7 @@ mod tests {
 
         let verifies = validate_slab_offsets_file(offsets_path, true);
         // This should return false
-        assert_ne!(verifies.0, true);
+        assert!(!verifies.0);
         assert_eq!(verifies.1, 0);
         assert!(verifies.2.is_some());
     }
@@ -703,19 +703,14 @@ mod tests {
         let mut buf_a = vec![0u8; meta_a.len() as usize];
         let mut buf_b = vec![0u8; meta_a.len() as usize];
 
-        let na = file_a.read_exact(&mut buf_a)?;
-        let nb = file_b.read_exact(&mut buf_b)?;
-
-        // Check read lengths (this should never be different)
-        if na != nb {
-            return Ok(false);
-        }
+        file_a.read_exact(&mut buf_a)?;
+        file_b.read_exact(&mut buf_b)?;
 
         if buf_a != buf_b {
             return Ok(false);
         }
 
-        return Ok(true);
+        Ok(true)
     }
 
     #[test]

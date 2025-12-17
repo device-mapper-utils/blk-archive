@@ -38,7 +38,7 @@ impl Generator {
         match &self.pattern {
             Pattern::Lcg => {
                 self.x = seed;
-                assert!(bytes.len() % 8 == 0);
+                assert!(bytes.len().is_multiple_of(8));
                 let nr_words = bytes.len() / 8;
                 let mut out = Cursor::new(bytes);
 
@@ -64,7 +64,7 @@ impl Generator {
         match &self.pattern {
             Pattern::Lcg => {
                 self.x = seed;
-                assert!(bytes.len() % 8 == 0);
+                assert!(bytes.len().is_multiple_of(8));
                 let nr_words = bytes.len() / 8;
                 let mut input = Cursor::new(bytes);
 
