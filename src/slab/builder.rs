@@ -108,7 +108,7 @@ impl<P: AsRef<Path>> SlabFileBuilder<P> {
     }
 
     /// Build the SlabFile according to the configuration
-    pub fn build(self) -> Result<SlabFile> {
+    pub fn build(self) -> Result<SlabFile<'static>> {
         // Validate configuration
         if self.create && !self.write {
             return Err(anyhow!("Cannot create a file without write access"));
