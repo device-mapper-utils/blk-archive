@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::hash::{self, BlockHash, StreamHash};
+use crate::slab::data_cache::DEFAULT_DATA_CACHE_SIZE_MEG;
 
 //-----------------------------------------
 
@@ -20,8 +21,6 @@ pub struct Config {
     #[serde(default)]
     pub stream_hash: StreamHash,
 }
-
-const DEFAULT_DATA_CACHE_SIZE_MEG: usize = 1024;
 
 fn numeric_override<T>(matches: &ArgMatches, name: &str, default: T) -> T
 where

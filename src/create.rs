@@ -11,7 +11,7 @@ use crate::hash::{BlockHash, StreamHash};
 use crate::paths;
 use crate::paths::*;
 use crate::recovery;
-use crate::slab::{builder::*, MultiFile};
+use crate::slab::{builder::*, data_cache::DEFAULT_DATA_CACHE_SIZE_MEG, MultiFile};
 use crate::stream_archive;
 use crate::{config::*, cuckoo_filter};
 use crate::{cuckoo_filter::*, hash};
@@ -173,12 +173,20 @@ pub struct CreateParmeters {
 pub fn default(dir: &Path) -> Result<CreateParmeters> {
     let block_hash = BlockHash::default();
     let stream_hash = StreamHash::default();
-    create(dir, true, 4096, 1024, 1024, block_hash, stream_hash)?;
+    create(
+        dir,
+        true,
+        4096,
+        DEFAULT_DATA_CACHE_SIZE_MEG,
+        DEFAULT_DATA_CACHE_SIZE_MEG,
+        block_hash,
+        stream_hash,
+    )?;
     Ok(CreateParmeters {
         data_compression: true,
         block_size: 4096,
-        hash_cache_size_meg: 1024,
-        data_cache_size_meg: 1024,
+        hash_cache_size_meg: DEFAULT_DATA_CACHE_SIZE_MEG,
+        data_cache_size_meg: DEFAULT_DATA_CACHE_SIZE_MEG,
         block_hash,
         stream_hash,
     })
@@ -194,8 +202,10 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
         report.info(&format!("adjusting block size to {}", new_block_size));
         block_size = new_block_size;
     }
-    let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
-    let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
+    let hash_cache_size_meg =
+        numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", DEFAULT_DATA_CACHE_SIZE_MEG)?;
+    let data_cache_size_meg =
+        numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", DEFAULT_DATA_CACHE_SIZE_MEG)?;
 
     // Parse hash algorithm selections
     let block_hash_str = matches.get_one::<String>("BLOCK_HASH").unwrap();
