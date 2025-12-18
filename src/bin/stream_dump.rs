@@ -368,6 +368,9 @@ pub struct SlabHandles {
 fn main() -> Result<()> {
     let args = parse_args()?;
 
+    // We need to read up the archive config to figure out what hash algr. we are using
+    blk_archive::config::find_and_load_config(&args.streams_dir)?;
+
     // Open stream files
     let files = open_stream_files(&args.streams_dir)?;
 

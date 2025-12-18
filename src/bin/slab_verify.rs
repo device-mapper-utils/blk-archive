@@ -624,6 +624,9 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| offsets_path(args.slab_file.clone()));
 
+    // We need to read up the archive config to figure out what hash algr. we are using
+    blk_archive::config::find_and_load_config(&args.slab_file)?;
+
     // If corrupt_slab is specified, corrupt and exit
     if let Some(ref spec) = args.corrupt_slab {
         return corrupt_slab(&args.slab_file, spec);

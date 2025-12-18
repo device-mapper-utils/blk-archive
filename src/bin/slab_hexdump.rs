@@ -470,6 +470,9 @@ fn main() -> Result<()> {
         args.slab_type
     };
 
+    // We need to read up the archive config to figure out what hash algr. we are using
+    blk_archive::config::find_and_load_config(&args.slab_file)?;
+
     let file = File::open(&args.slab_file)
         .with_context(|| format!("Failed to open file: {:?}", args.slab_file))?;
     let mut reader = BufReader::new(file);

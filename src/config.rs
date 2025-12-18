@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::prelude::*;
 use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,62 @@ where
     config.data_cache_size_meg = cache_size;
 
     Ok(config)
+}
+
+/// Finds dm-archive.yaml by walking up the directory tree from the given path
+/// and loads the configuration with empty ArgMatches.
+///
+/// This is useful for debug utilities that need to initialize hash functions
+/// before using them, but don't have command-line arguments to override config.
+///
+/// # Arguments
+/// * `start_path` - A file or directory path to start searching from
+///
+/// # Returns
+/// * `Ok(Config)` - The loaded configuration
+/// * `Err` - If dm-archive.yaml cannot be found or cannot be parsed
+///
+/// # Example
+/// ```no_run
+/// use blk_archive::config;
+/// use std::path::Path;
+///
+/// let config = config::find_and_load_config(Path::new("/path/to/archive/streams/metadata"))?;
+/// // Now hash functions are initialized and ready to use
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn find_and_load_config<P: AsRef<Path>>(start_path: P) -> Result<Config> {
+    let start = start_path.as_ref();
+
+    // Determine the starting directory
+    let mut current = if start.is_file() {
+        start
+            .parent()
+            .ok_or_else(|| anyhow!("Cannot get parent directory of file: {:?}", start))?
+    } else {
+        start
+    };
+
+    // Walk up the directory tree looking for dm-archive.yaml
+    loop {
+        let config_path = current.join("dm-archive.yaml");
+        if config_path.exists() {
+            // Found it! Load the config with empty ArgMatches
+            let dummy_matches = clap::ArgMatches::default();
+            return read_config(current, &dummy_matches);
+        }
+
+        // Move to parent directory
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => {
+                return Err(anyhow!(
+                    "Could not find dm-archive.yaml by walking up from {:?}",
+                    start
+                ))
+            }
+        }
+    }
 }
 
 //-----------------------------------------
