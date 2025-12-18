@@ -46,36 +46,45 @@ fn handle_repair_mode(archive_path: &str, is_repairing: bool, force: bool) -> Re
     }
 }
 
+/// Executes the appropriate pre‑flight steps
+///
+/// Check for and apply recovery checkpoint before processing any command
+/// This handles interrupted operations by truncating files to last known-good state
+/// and cleaning up indexs, cuckoo filters etc.
+fn run_preflight(matches: &clap::ArgMatches) -> anyhow::Result<()> {
+    let Some((subcommand, sub_matches)) = matches.subcommand() else {
+        return Ok(()); // No subcommand – nothing to do.
+    };
+
+    let is_create = subcommand == "create";
+    let skip_data = std::env::var_os("BLK_ARCHIVE_DEVEL_SKIP_DATA").is_some();
+
+    // `create` doesn't need an existing archive/config.
+    if is_create {
+        return Ok(());
+    }
+
+    // Commands other than `create` require ARCHIVE.
+    let archive_path = sub_matches
+        .get_one::<String>("ARCHIVE")
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: ARCHIVE"))?;
+
+    config::read_config(archive_path, matches)?;
+
+    if !skip_data {
+        let is_repairing = repairing(subcommand, sub_matches);
+        let force = subcommand == "verify" && sub_matches.get_flag("FORCE");
+        handle_repair_mode(archive_path, is_repairing, force)?;
+    }
+
+    Ok(())
+}
+
 fn main_() -> Result<()> {
     let cli = cli::build_cli();
     let matches = cli.get_matches();
 
-    // Check for and apply recovery checkpoint before processing any command
-    // This handles interrupted operations by truncating files to last known-good state
-    // and cleaning up indexs, cuckoo filters etc.
-    if let Some((subcommand_name, sub_matches)) = matches.subcommand() {
-        if let Some(archive_path) = sub_matches.get_one::<String>("ARCHIVE") {
-            // We have an archive we need to read it up which will initialize hash functions
-            // we will ignore errors here as the archive might not even exist yet
-            let c = config::read_config(archive_path, &matches);
-            if c.is_err() {
-                eprintln!("read_config error, does this look legit? {:?}", c);
-            }
-
-            // Do a preflight check before proceeding to ensure the archive is in a hopefully
-            // good state (skip for create command as archive doesn't exist yet)
-            if subcommand_name != "create" && std::env::var("BLK_ARCHIVE_DEVEL_SKIP_DATA").is_err()
-            {
-                let is_repairing = repairing(subcommand_name, sub_matches);
-                let force = if subcommand_name == "verify" {
-                    sub_matches.get_flag("FORCE")
-                } else {
-                    false
-                };
-                handle_repair_mode(archive_path, is_repairing, force)?;
-            }
-        }
-    }
+    run_preflight(&matches)?;
 
     match matches.subcommand() {
         Some(("create", sub_matches)) => {
