@@ -2,7 +2,7 @@
 // https://github.com/rust-lang/rust/issues/46379
 #![allow(dead_code)]
 
-pub mod blk_archive;
+pub mod blk_stash;
 pub mod block_visitor;
 pub mod fixture;
 pub mod process;

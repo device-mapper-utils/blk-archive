@@ -10,7 +10,7 @@ where
     I: IntoIterator,
     I::Item: Into<OsString>,
 {
-    const RUST_PATH: &str = env!("CARGO_BIN_EXE_blk-archive");
+    const RUST_PATH: &str = env!("CARGO_BIN_EXE_blk-stash");
 
     let mut all_args = vec![Into::<OsString>::into(cmd)];
     for a in args {

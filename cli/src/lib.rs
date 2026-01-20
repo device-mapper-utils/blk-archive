@@ -9,7 +9,7 @@ pub fn build_cli() -> clap::Command {
         .short('a')
         .value_name("ARCHIVE")
         .num_args(1)
-        .env("BLK_ARCHIVE_DIR")
+        .env("BLK_STASH_DIR")
         .required(true)
         .help_heading("Required Options");
 
@@ -40,10 +40,10 @@ pub fn build_cli() -> clap::Command {
         .num_args(1)
         .help_heading("Optional Options");
 
-    command!("blk-archive")
+    command!("blk-stash")
         .version(env!("CARGO_PKG_VERSION"))
         .propagate_version(true)
-        .bin_name("blk-archive")
+        .bin_name("blk-stash")
         .disable_help_flag(true)
         .disable_version_flag(true)
         .subcommand_required(true)
@@ -149,7 +149,19 @@ pub fn build_cli() -> clap::Command {
                         .help_heading("Optional Options"),
                 )
                 .arg(data_cache_size.clone())
-                .arg(json.clone()),
+                .arg(json.clone())
+                .arg(
+                    Arg::new("SYNC_POINT_SECS")
+                        .help("Number of seconds before creating a sync point in the archive. Smaller \
+                              values allow you to restart a pack with less data needing to be added to \
+                              archive at the cost of slower pack times")
+                        .required(false)
+                        .long("sync-point-secs")
+                        .value_name("SYNC_POINT_SECS")
+                        .num_args(1)
+                        .default_value("15")
+                        .value_parser(clap::value_parser!(u64).range(1..)),
+                ),
         )
         .subcommand(
             Command::new("unpack")
