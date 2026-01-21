@@ -56,7 +56,7 @@ fn gen_man() {
     use std::fs::File;
     use std::path::Path;
 
-    let binary = "blk-archive";
+    let binary = "blk-stash";
     let ver = env!("CARGO_PKG_VERSION");
 
     let root_cmd = cli::build_cli();
@@ -69,7 +69,7 @@ fn gen_man() {
     let base = Path::new(&out_dir);
 
     // Generate main page
-    let main_path = base.join("blk-archive.1");
+    let main_path = base.join("blk-stash.1");
     let mut file = File::create(&main_path).unwrap();
 
     let mut root_man = Man::new(root_cmd.clone());

@@ -1,5 +1,5 @@
-name: GitHub Action for blk-archive
-run-name: ${{ github.actor }} is running blk-archive unit tests 🚀
+name: GitHub Action for blk-stash
+run-name: ${{ github.actor }} is running blk-stash unit tests 🚀
 on: [push]
 jobs:
   Explore-GitHub-Actions:
