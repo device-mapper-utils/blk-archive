@@ -1,3 +1,8 @@
+use std::sync::Arc;
+use thinp::report::*;
+
+use crate::output::Output;
+
 pub fn round_pow2(i: u32) -> u64 {
     // Round up to the next power of 2
     // https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
@@ -28,6 +33,32 @@ pub fn unmapped_digest_add(hasher: &mut blake3::Hasher, len: u64) {
         hasher.update(&buf[0..hash_len as usize]);
         remaining -= hash_len;
     }
+}
+
+pub fn error_chain_string(err: &anyhow::Error) -> String {
+    let mut s = err.to_string();
+    for cause in err.chain().skip(1) {
+        s.push_str("\nCaused by: ");
+        s.push_str(&cause.to_string());
+    }
+    s
+}
+
+pub fn mk_report(json: bool) -> Arc<Report> {
+    if json {
+        Arc::new(mk_quiet_report())
+    } else if atty::is(atty::Stream::Stdout) {
+        Arc::new(mk_progress_bar_report())
+    } else {
+        Arc::new(mk_simple_report())
+    }
+}
+
+pub fn mk_output(json: bool) -> Arc<Output> {
+    let report = mk_report(json);
+    report.set_level(LogLevel::Info);
+
+    Arc::new(Output { report, json })
 }
 
 #[cfg(test)]

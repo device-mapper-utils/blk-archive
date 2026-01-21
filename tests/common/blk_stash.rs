@@ -27,6 +27,10 @@ pub struct PackResponse {
 }
 
 impl BlkArchive {
+    pub fn archive_path(&self) -> &Path {
+        &self.archive
+    }
+
     pub fn new(archive: &Path) -> Result<Self> {
         Self::new_with(archive, 4096, true)
     }
@@ -55,12 +59,12 @@ impl BlkArchive {
     }
 
     pub fn data_size(&self) -> std::io::Result<u64> {
-        fn file_size(path: &PathBuf) -> std::io::Result<u64> {
+        fn file_size(path: &Path) -> std::io::Result<u64> {
             fs::metadata(path).map(|meta| meta.len())
         }
 
-        let base_path = self.archive.clone();
-        let data_size = file_size(&base_path.join("data/data"))?;
+        let data_path = self.archive.join("data/data");
+        let data_size = file_size(&data_path)?;
         Ok(data_size)
     }
 
@@ -93,6 +97,24 @@ impl BlkArchive {
 
     pub fn verify(&self, input: &Path, stream: &str) -> Result<()> {
         run_ok(self.verify_cmd(input, stream))?;
+        Ok(())
+    }
+
+    pub fn verify_all_cmd(&self) -> Command {
+        verify_cmd(args!["-a", &self.archive, "--all"])
+    }
+
+    pub fn verify_all(&self) -> Result<()> {
+        run_ok(self.verify_all_cmd())?;
+        Ok(())
+    }
+
+    pub fn verify_all_with_repair_cmd(&self) -> Command {
+        verify_cmd(args!["-a", &self.archive, "--all", "--repair", "--force"])
+    }
+
+    pub fn verify_all_with_repair(&self) -> Result<()> {
+        run_ok(self.verify_all_with_repair_cmd())?;
         Ok(())
     }
 }

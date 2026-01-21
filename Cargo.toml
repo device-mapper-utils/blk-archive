@@ -1,5 +1,5 @@
 [package]
-name = "blk_archive"
+name = "blk_stash"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,20 +8,24 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 atty = "0.2"
+bincode = "1.3"
 blake2 = "0.10"
 blake3 = "1"
 byteorder = "1.4"
 chrono = "0.4"
 clap = { version = "4.5.26", features = ["cargo", "env"] }
 cli = { path = "./cli" }
+crc = "3"
 devicemapper = { git = "https://github.com/stratis-storage/devicemapper-rs", branch = "master" }
 gearhash = "0.1.3"
 generic-array = "0.14"
+hex = "0.4"
 serde_json = "1.0.96"
 libc = "0.2"
 linked-hash-map = "0.5.6"
 lru = "0.12.5"
-nix = "0.29"
+memmap2 = "0.9"
+nix = { version = "0.29", features = ["process", "signal"] }
 nom = "7.1"
 num_enum = "0.7.3"
 rand = "0.8"
@@ -53,9 +57,21 @@ tempfile = "3.16"
 [features]
 skip_cleanup = []
 
+[[bin]]
+name = "slab-verify"
+path = "src/bin/slab_verify.rs"
+
+[[bin]]
+name = "stream-dump"
+path = "src/bin/stream_dump.rs"
+
+[[bin]]
+name = "slab-hexdump"
+path = "src/bin/slab_hexdump.rs"
+
 [profile.release]
 debug = 1
 
 [[bin]]
-name = "blk-archive"
+name = "blk-stash"
 path = "src/main.rs"

@@ -1,4 +1,4 @@
-use clap::{command, Arg, ArgAction, ArgGroup, Command, ValueHint};
+use clap::{command, Arg, ArgAction, Command, ValueHint};
 
 use std::env;
 
@@ -9,7 +9,7 @@ pub fn build_cli() -> clap::Command {
         .short('a')
         .value_name("ARCHIVE")
         .num_args(1)
-        .env("BLK_ARCHIVE_DIR")
+        .env("BLK_STASH_DIR")
         .required(true)
         .help_heading("Required Options");
 
@@ -40,10 +40,10 @@ pub fn build_cli() -> clap::Command {
         .num_args(1)
         .help_heading("Optional Options");
 
-    command!("blk-archive")
+    command!("blk-stash")
         .version(env!("CARGO_PKG_VERSION"))
         .propagate_version(true)
-        .bin_name("blk-archive")
+        .bin_name("blk-stash")
         .disable_help_flag(true)
         .disable_version_flag(true)
         .subcommand_required(true)
@@ -119,37 +119,51 @@ pub fn build_cli() -> clap::Command {
                 .about("packs a stream into the archive")
                 .arg(
                     Arg::new("INPUT")
-                        .help("Specify a device or file to archive")
+                        .help("Specify one or more devices or files to archive (only one INPUT allowed with --delta-stream/--delta-device)")
                         .required(true)
                         .value_name("INPUT")
-                        .num_args(1)
+                        .num_args(1..)
                         .help_heading("Required Options"),
                 )
                 .arg(archive_arg.clone())
                 .arg(
                     Arg::new("DELTA_STREAM")
                         .help(
-                            "Specify the stream that contains an older version of this thin device",
+                            "Specify the stream that contains an older version of this thin device (requires --delta-device, only single INPUT allowed)",
                         )
                         .required(false)
                         .long("delta-stream")
                         .value_name("DELTA_STREAM")
                         .num_args(1)
+                        .requires("DELTA_DEVICE")
                         .help_heading("Optional Options"),
                 )
                 .arg(
                     Arg::new("DELTA_DEVICE")
                         .help(
-                            "Specify the device that contains an older version of this thin device",
+                            "Specify the device that contains an older version of this thin device (requires --delta-stream, only single INPUT allowed)",
                         )
                         .required(false)
                         .long("delta-device")
                         .value_name("DELTA_DEVICE")
                         .num_args(1)
+                        .requires("DELTA_STREAM")
                         .help_heading("Optional Options"),
                 )
                 .arg(data_cache_size.clone())
-                .arg(json.clone()),
+                .arg(json.clone())
+                .arg(
+                    Arg::new("SYNC_POINT_SECS")
+                        .help("Number of seconds before creating a sync point in the archive. Smaller \
+                              values allow you to restart a pack with less data needing to be added to \
+                              archive at the cost of slower pack times")
+                        .required(false)
+                        .long("sync-point-secs")
+                        .value_name("SYNC_POINT_SECS")
+                        .num_args(1)
+                        .default_value("15")
+                        .value_parser(clap::value_parser!(u64).range(1..)),
+                ),
         )
         .subcommand(
             Command::new("unpack")
@@ -179,25 +193,46 @@ pub fn build_cli() -> clap::Command {
         .about("verifies stream in the archive against the original file/dev or an internal blake3 hash")
         .arg(
             Arg::new("INPUT")
-                .help("Device or file containing the correct version of the data")
+                .help("Device or file containing the correct version of the data (only valid with --stream)")
                 .value_name("INPUT")
                 .value_hint(ValueHint::FilePath)
-                .num_args(1), // not required; enforced via group below
+                .num_args(1)
+                .conflicts_with("ALL"), // INPUT not allowed with --all
         )
         .arg(
             Arg::new("internal")
                 .long("internal")
-                .help("Verify using the archive's internally stored blake3 hash (no INPUT needed)")
+                .help("Verify using the archive's internally stored blake3 hash (implied with --all)")
                 .action(ArgAction::SetTrue),
         )
-        .group(
-            ArgGroup::new("verify-source")
-                .args(["INPUT", "internal"])
-                .required(true), // must choose exactly one
+        .arg(
+            Arg::new("ALL")
+                .help("Verify all streams in the archive using internal blake3 hashes")
+                .long("all")
+                .action(ArgAction::SetTrue)
+                .help_heading("Optional Options"),
+        )
+        .arg(
+            Arg::new("REPAIR")
+                .help("Attempt to repair any errors found (requires --all)")
+                .long("repair")
+                .action(ArgAction::SetTrue)
+                .requires("ALL")
+                .conflicts_with("STREAM")
+                .help_heading("Optional Options"),
+        )
+        .arg(
+            Arg::new("FORCE")
+                .help("Skip confirmation prompt when using --repair")
+                .long("force")
+                .short('f')
+                .action(ArgAction::SetTrue)
+                .requires("REPAIR")
+                .help_heading("Optional Options"),
         )
         .arg(data_cache_size.clone())
         .arg(archive_arg.clone())
-        .arg(stream_arg.clone())
+        .arg(stream_arg.clone().required(false).conflicts_with("ALL"))
         .arg(json.clone()),
 )
         .subcommand(

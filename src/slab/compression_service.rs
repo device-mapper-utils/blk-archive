@@ -579,10 +579,10 @@ mod tests {
         results.sort_by_key(|d| d.index);
 
         // Verify all data was processed correctly
-        for i in 0..NUM_ITEMS {
-            assert_eq!(results[i].index, i as u64);
-            assert_eq!(results[i].data.len(), 100);
-            assert_eq!(results[i].data[0], i as u8);
+        for (i, item) in results.iter().enumerate().take(NUM_ITEMS) {
+            assert_eq!(item.index, i as u64);
+            assert_eq!(item.data.len(), 100);
+            assert_eq!(item.data[0], i as u8);
         }
 
         // Join the service - this should complete quickly since we already shut it down
