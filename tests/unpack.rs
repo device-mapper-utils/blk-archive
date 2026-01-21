@@ -15,12 +15,12 @@ fn unpack_file() -> Result<()> {
 
     let file_size = 16 * 1024 * 1024;
     let seed = 1;
-    let input = create_input_file(&mut td, file_size, seed, Pattern::LCG)?;
+    let input = create_input_file(&mut td, file_size, seed, Pattern::Lcg)?;
     let stream = archive.pack(&input)?.stream_id;
 
     let output = td.mk_path("output.bin");
     archive.unpack(&stream, &output, true)?;
-    verify_file(&output, file_size, seed, Pattern::LCG)
+    verify_file(&output, file_size, seed, Pattern::Lcg)
 }
 
 //-----------------------------------------

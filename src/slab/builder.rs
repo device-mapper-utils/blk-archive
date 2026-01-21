@@ -16,7 +16,7 @@ use crate::slab::file::*;
 /// Creating a new compressed slab file:
 /// ```
 /// # use anyhow::Result;
-/// # use blk_archive::slab::*;
+/// # use blk_stash::slab::*;
 /// # fn example() -> Result<()> {
 /// let slab_file = SlabFileBuilder::create("data.slab")
 ///     .compressed(true)
@@ -30,7 +30,7 @@ use crate::slab::file::*;
 /// Opening an existing slab file for reading:
 /// ```
 /// # use anyhow::Result;
-/// # use blk_archive::slab::*;
+/// # use blk_stash::slab::*;
 /// # fn example() -> Result<()> {
 /// let slab_file = SlabFileBuilder::open("data.slab")
 ///     .cache_nr_entries(100)
@@ -108,7 +108,7 @@ impl<P: AsRef<Path>> SlabFileBuilder<P> {
     }
 
     /// Build the SlabFile according to the configuration
-    pub fn build(self) -> Result<SlabFile> {
+    pub fn build(self) -> Result<SlabFile<'static>> {
         // Validate configuration
         if self.create && !self.write {
             return Err(anyhow!("Cannot create a file without write access"));
