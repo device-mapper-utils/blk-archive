@@ -1,20 +1,20 @@
-# blk-archive Use Cases
+# blk-stash Use Cases
 
 ## Create a new archive
 
 **Scenario:**
-You want to initialize a new archive directory where blk-archive will store deduplicated and compressed data.
+You want to initialize a new archive directory where blk-stash will store deduplicated and compressed data.
 
 **Goal:**
 Set up a root directory for an archive with an appropriate block size.
 
-**Solution with blk-archive:**
-Use the `create` subcommand with the `-a` switch. The directory should not exist beforehand; it will be created by blk-archive. Optionally, specify a block size (rounded to nearest power of two). Smaller block sizes improve deduplication but increase metadata overhead.
+**Solution with blk-stash:**
+Use the `create` subcommand with the `-a` switch. The directory should not exist beforehand; it will be created by blk-stash. Optionally, specify a block size (rounded to nearest power of two). Smaller block sizes improve deduplication but increase metadata overhead.
 
 **Example commands:**
 ```bash
-blk-archive create -a my-archive
-blk-archive create -a my-archive --block-size 8092
+blk-stash create -a my-archive
+blk-stash create -a my-archive --block-size 8092
 ```
 
 An archive is composed of a directory with multiple sub directories and files.
@@ -42,13 +42,13 @@ You want to store a large file efficiently, reducing storage via deduplication a
 **Goal:**
 Deduplicate and compress file data and pack it into an archive.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Use the `pack` subcommand. Statistics will be shown to understand compression and deduplication effectiveness along with some other data (subject to change before release 1.0).
 
 **Example command:**
 
 ```bash
-blk-archive pack -a my-archive /tmp/test_file.bin
+blk-stash pack -a my-archive /tmp/test_file.bin
 Packing /tmp/test_file.bin ... [                                        ] Remaining 0s
 elapsed          : 1.033
 stream id        : ba83f083d6628555
@@ -71,12 +71,12 @@ You want to archive the contents of a block device that is currently unused (not
 **Goal:**
 Safely archive a block device by reading its content directly.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Use `pack` just as you would do with a file.
 
 **Example command:**
 ```bash
-blk-archive pack -a my-archive /dev/ublkb1
+blk-stash pack -a my-archive /dev/ublkb1
 Packing /dev/ublkb1 ... [                                        ] Remaining 0s
 elapsed          : 795.734
 stream id        : 2b3985ef2ec276eb
@@ -99,14 +99,14 @@ You need to archive a block device that is currently in use.
 **Goal:**
 Capture a consistent snapshot of the live device and archive it without unmounting.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Use LVM to create a snapshot and archive the snapshot device.  The snapshot needs to be inactive
 before adding it to the archive.
 
 **Example commands:**
 ```bash
 lvcreate -s --name snap1 --size 512M my-vg/my-thick-volume
-blk-archive pack -a my-archive /dev/my-vg/snap1
+blk-stash pack -a my-archive /dev/my-vg/snap1
 Packing /dev/dm-8 ... [                                        ] Remaining 0s
 elapsed          : 1.099
 stream id        : 689a120cd415c0f7
@@ -129,12 +129,12 @@ You are archiving a thinly provisioned device, e.g., from a thin LVM pool that i
 **Goal:**
 Efficiently archive only provisioned regions of a thin device.
 
-**Solution with blk-archive:**
-blk-archive detects thin devices and reads only mapped areas, saving time and space.
+**Solution with blk-stash:**
+blk-stash detects thin devices and reads only mapped areas, saving time and space.
 
 **Example commands:**
 ```bash
-blk-archive pack -a my-archive /dev/my-vg/my-thin-volume
+blk-stash pack -a my-archive /dev/my-vg/my-thin-volume
 elapsed          : 0.067
 stream id        : 3b9beb432a83a142
 file size        : 1G
@@ -156,7 +156,7 @@ You want to archive a thin device that is actively used.
 **Goal:**
 Create a snapshot of the device and archive its state with minimal new data written.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Use `lvcreate` to snapshot the device. Then archive the snapshot using `pack`.
 
 **Example commands:**
@@ -166,7 +166,7 @@ lvcreate -s --name base-line my-vg/my-thin-volume
 
 lvchange -ay -Ky my-vg/base-line
 
-blk-archive pack -a my-archive /dev/my-vg/base-line
+blk-stash pack -a my-archive /dev/my-vg/base-line
 elapsed          : 0.079
 stream id        : b53d6b40b692f645
 file size        : 1G
@@ -191,12 +191,12 @@ You have archived a previous version of a device and now want to archive a newer
 **Goal:**
 Use delta encoding to avoid storing duplicated data from a previously archived snapshot.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Use `pack` and provide the previous stream ID and device path to enable delta mode.
 
 **Example commands:**
 ```bash
-blk-archive pack -a my-archive /dev/my-vg/delta-ss-second  --delta-stream 3d1444b0baa4a1e1 --delta-device /dev/my-vg/delta-ss-initial
+blk-stash pack -a my-archive /dev/my-vg/delta-ss-second  --delta-stream 3d1444b0baa4a1e1 --delta-device /dev/my-vg/delta-ss-initial
 elapsed          : 0.101
 stream id        : 7cd3daf2d6062d40
 file size        : 1G
@@ -218,12 +218,12 @@ You want to see which files or devices have been archived.
 **Goal:**
 List all the streams stored in the archive along with metadata.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Use the `list` subcommand.
 
 **Example command:**
 ```bash
-blk-archive list -a my-archive
+blk-stash list -a my-archive
 689a120cd415c0f7 1073741824 Jul 29 25 14:18 snap1
 3b9beb432a83a142 1073741824 Jul 29 25 14:22 my-thin-volume
 b53d6b40b692f645 1073741824 Jul 29 25 14:45 base-line
@@ -239,12 +239,12 @@ You want to recover a previously archived file to a new destination.
 **Goal:**
 Restore data from a stream using its unique ID.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Use the `unpack` command with the `--create` option.
 
 **Example command:**
 ```bash
-blk-archive unpack -a my-archive --stream af5449cc3a2f95ab --create /tmp/my-file
+blk-stash unpack -a my-archive --stream af5449cc3a2f95ab --create /tmp/my-file
 speed            : 449.84M/s
 ```
 
@@ -256,12 +256,12 @@ You want to restore a stream to an existing block device.
 **Goal:**
 Recreate a previously archived block device.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Use `unpack` without `--create`. Destination must already exist and match original size.
 
 **Example command:**
 ```bash
-blk-archive unpack -a my-archive --stream 7cd3daf2d6062d40 /dev/my-vg/restore-volume
+blk-stash unpack -a my-archive --stream 7cd3daf2d6062d40 /dev/my-vg/restore-volume
 speed            : 1.72G/s
 ```
 
@@ -273,30 +273,30 @@ You want to restore data to a thin device, reusing storage via copy-on-write whe
 **Goal:**
 Maximize data sharing during restore to a thin device.
 
-**Solution with blk-archive:**
-blk-archive checks for duplicate regions and avoids unnecessary writes to preserve sharing.
+**Solution with blk-stash:**
+blk-stash checks for duplicate regions and avoids unnecessary writes to preserve sharing.
 
 **Example command:**
 ```bash
-blk-archive unpack -a my-archive --stream 7cd3daf2d6062d40 /dev/my-vg/restore-thin-volume
+blk-stash unpack -a my-archive --stream 7cd3daf2d6062d40 /dev/my-vg/restore-thin-volume
 speed            : 12.35G/s
 ```
 
-## Integrate blk-archive with other tools
+## Integrate blk-stash with other tools
 
 **Scenario:**
-You want to integrate blk-archive into other tools or work flows
+You want to integrate blk-stash into other tools or work flows
 
 **Goal:**
 Enable automated, non-interactive usage.
 
-**Solution with blk-archive:**
-blk-archive supports JSON output to facilitate integration with other tools.
+**Solution with blk-stash:**
+blk-stash supports JSON output to facilitate integration with other tools.
 Use the `-j` option to enable JSON-formatted output.
 
 **Example command:**
 ```bash
-blk-archive -j pack -a my-archive /usr/bin/ls
+blk-stash -j pack -a my-archive /usr/bin/ls
 ```
 
 **Example JSON output:**
@@ -320,7 +320,7 @@ You want to remove specific streams from an archive to save space.
 **Goal:**
 Delete unused streams from the archive.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Not supported. Workaround is to create a new archive and repack selected streams using original
 files or block devices.
 
@@ -335,7 +335,7 @@ You want to move selected streams from one archive to another for cleanup or rot
 **Goal:**
 Support rotation, pruning, and long-term storage by moving streams.
 
-**Solution with blk-archive:**
+**Solution with blk-stash:**
 Planned feature. Not yet implemented.
 
 **Example command:**
