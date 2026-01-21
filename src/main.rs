@@ -1,33 +1,19 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use clap::ArgMatches;
 use std::process::exit;
 use std::sync::Arc;
-use thinp::report::*;
 
-use blk_archive::create;
-use blk_archive::dump_stream;
-use blk_archive::list;
-use blk_archive::output::Output;
-use blk_archive::pack;
-use blk_archive::unpack;
+use blk_stash::config;
+use blk_stash::create;
+use blk_stash::dump_stream;
+use blk_stash::list;
+use blk_stash::output::Output;
+use blk_stash::pack;
+use blk_stash::recovery::{confirm_data_loss_warning, flight_check};
+use blk_stash::unpack;
+use blk_stash::utils::mk_output;
 
 //-----------------------
-
-fn mk_report(json: bool) -> Arc<Report> {
-    if json {
-        Arc::new(mk_quiet_report())
-    } else if atty::is(atty::Stream::Stdout) {
-        Arc::new(mk_progress_bar_report())
-    } else {
-        Arc::new(mk_simple_report())
-    }
-}
-
-fn mk_output(json: bool) -> Arc<Output> {
-    let report = mk_report(json);
-    report.set_level(LogLevel::Info);
-
-    Arc::new(Output { report, json })
-}
 
 fn with_output<F>(matches: &clap::ArgMatches, f: F) -> Result<()>
 where
@@ -38,9 +24,66 @@ where
     f(output)
 }
 
+fn repairing(subcommand_name: &str, sub_matches: &ArgMatches) -> bool {
+    subcommand_name == "verify" && sub_matches.get_flag("REPAIR")
+}
+
+fn handle_repair_mode(archive_path: &str, is_repairing: bool, force: bool) -> Result<()> {
+    match (flight_check(archive_path), is_repairing) {
+        (Ok(_), true) | (Err(_), true) => {
+            // Either way, repairing requires confirmation (unless --force is used)
+            if !force && !confirm_data_loss_warning() {
+                return Err(anyhow!("User selected to NOT confirm data loss, exiting!"));
+            }
+            Ok(())
+        }
+        (Err(e), false) => {
+            eprintln!("Archive is in an inconsistent state, try verify --all --repair");
+            Err(e)
+        }
+        (Ok(_), false) => Ok(()),
+    }
+}
+
+/// Executes the appropriate pre‑flight steps
+///
+/// Check for and apply recovery checkpoint before processing any command
+/// This handles interrupted operations by truncating files to last known-good state
+/// and cleaning up indexs, cuckoo filters etc.
+fn run_preflight(matches: &clap::ArgMatches) -> anyhow::Result<()> {
+    let Some((subcommand, sub_matches)) = matches.subcommand() else {
+        return Ok(()); // No subcommand – nothing to do.
+    };
+
+    let is_create = subcommand == "create";
+    let skip_data = std::env::var_os("BLK_ARCHIVE_DEVEL_SKIP_DATA").is_some();
+
+    // `create` doesn't need an existing archive/config.
+    if is_create {
+        return Ok(());
+    }
+
+    // Commands other than `create` require ARCHIVE.
+    let archive_path = sub_matches
+        .get_one::<String>("ARCHIVE")
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: ARCHIVE"))?;
+
+    config::read_config(archive_path, matches)?;
+
+    if !skip_data {
+        let is_repairing = repairing(subcommand, sub_matches);
+        let force = subcommand == "verify" && sub_matches.get_flag("FORCE");
+        handle_repair_mode(archive_path, is_repairing, force)?;
+    }
+
+    Ok(())
+}
+
 fn main_() -> Result<()> {
     let cli = cli::build_cli();
     let matches = cli.get_matches();
+
+    run_preflight(&matches)?;
 
     match matches.subcommand() {
         Some(("create", sub_matches)) => {

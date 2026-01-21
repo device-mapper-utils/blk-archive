@@ -2,7 +2,7 @@
 
 set -e
 archive=test-archive
-cmd=./target/release/blk-archive
+cmd=./target/release/blk-stash
 
 checkout() {
 	echo Checking out $1 ...

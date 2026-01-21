@@ -15,6 +15,8 @@ use crate::utils::is_pow2;
 const ENTRIES_PER_BUCKET: usize = 4;
 const MAX_KICKS: usize = 500;
 
+pub const INITIAL_SIZE: usize = 1 << 10;
+
 #[derive(Clone)]
 struct Bucket {
     entries: [u16; ENTRIES_PER_BUCKET],
@@ -183,6 +185,7 @@ impl CuckooFilter {
             .compressed(false)
             .build()?;
         file.write_slab(&out)?;
+        file.sync_all()?;
         file.close()?;
 
         Ok(())
