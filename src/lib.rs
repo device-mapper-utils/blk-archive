@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod cdc;
 pub mod chunkers;
 pub mod config;
 pub mod content_sensitive_splitter;
@@ -24,4 +25,5 @@ pub mod stream_metadata;
 pub mod thin_metadata;
 pub mod unpack;
 pub mod utils;
+pub mod vecdeque_reader;
 pub mod version;

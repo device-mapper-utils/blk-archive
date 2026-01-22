@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::archive::*;
+use crate::cdc::{create_cdc, ContentDefinedChunker};
 use crate::chunkers::*;
 use crate::config;
 use crate::content_sensitive_splitter::*;
@@ -311,7 +312,7 @@ impl Packer {
         stream_metadata: Arc<Mutex<SlabFile<'static>>>,
         stream_mappings: Arc<Mutex<SlabFile<'static>>>,
         data_archive_opt: Option<Data<'static, MultiFile>>,
-        splitter: &mut ContentSensitiveSplitter,
+        splitter: &mut ContentSensitiveSplitter<Box<dyn ContentDefinedChunker>>,
         is_last_file: bool,
     ) -> Result<(u64, Data<'static, MultiFile>)> {
         // Reuse existing Data archive or create a new one
@@ -404,7 +405,9 @@ impl Packer {
         // Otherwise just break to indicate non-contiguous data
         if is_last_file {
             // We need to consume the splitter, so create a temporary one to swap
-            let temp_splitter = ContentSensitiveSplitter::new(self.block_size as u32);
+            // Note: The CDC algorithm doesn't matter here since we're just swapping it out
+            let temp_cdc = create_cdc("gearhash", self.block_size)?;
+            let temp_splitter = ContentSensitiveSplitter::new(self.block_size as u32, temp_cdc);
             let final_splitter = std::mem::replace(splitter, temp_splitter);
             final_splitter.complete(&mut handler)?;
         } else {
@@ -901,7 +904,8 @@ where
     let mut data_archive_opt: Option<Data<'static, MultiFile>> = None;
 
     // Create a single splitter to be reused across all files
-    let mut splitter = ContentSensitiveSplitter::new(config.block_size as u32);
+    let cdc = create_cdc(&config.splitter_alg, config.block_size)?;
+    let mut splitter = ContentSensitiveSplitter::new(config.block_size as u32, cdc);
 
     // Extract metadata and mappings files from stream_archive
     let stream_metadata = stream_archive.metadata_file();

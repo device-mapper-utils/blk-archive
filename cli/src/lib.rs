@@ -134,6 +134,17 @@ pub fn build_cli() -> clap::Command {
                         .value_parser(["blake3-256", "xxhash3-128", "murmur3-128"])
                         .default_value("blake3-256")
                         .help_heading("Optional Options"),
+                )
+                .arg(
+                    Arg::new("CDC_ALGORITHM")
+                        .help("Content-defined chunking algorithm for deduplication")
+                        .required(false)
+                        .long("cdc-algorithm")
+                        .value_name("CDC_ALGORITHM")
+                        .num_args(1)
+                        .value_parser(["gearhash", "fastcdc"])
+                        .default_value("gearhash")
+                        .help_heading("Optional Options"),
                 ),
         )
         .subcommand(

@@ -203,6 +203,7 @@ dependencies = [
  "crc",
  "devicemapper 0.34.4 (git+https://github.com/stratis-storage/devicemapper-rs?branch=master)",
  "duct",
+ "fastcdc",
  "fasthash",
  "gearhash",
  "generic-array",
@@ -579,6 +580,12 @@ name = "exitcode"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de853764b47027c2e862a995c34978ffa63c1501f2e15f987ba11bd4f9bba193"
+
+[[package]]
+name = "fastcdc"
+version = "3.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf51ceb43e96afbfe4dd5c6f6082af5dfd60e220820b8123792d61963f2ce6bc"
 
 [[package]]
 name = "fasthash"

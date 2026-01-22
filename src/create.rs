@@ -34,6 +34,7 @@ fn write_config(
     data_cache_size_meg: usize,
     block_hash: BlockHash,
     stream_hash: StreamHash,
+    cdc_algorithm: String,
 ) -> Result<()> {
     let mut p = PathBuf::new();
     p.push(root);
@@ -49,7 +50,7 @@ fn write_config(
 
     let config = Config {
         block_size,
-        splitter_alg: "RollingHashV0".to_string(),
+        splitter_alg: cdc_algorithm,
         hash_cache_size_meg,
         data_cache_size_meg,
         block_hash,
@@ -96,35 +97,28 @@ fn numeric_option<T: std::str::FromStr>(matches: &ArgMatches, name: &str, dflt: 
 }
 */
 
-fn create(
-    archive_dir: &Path,
-    data_compression: bool,
-    block_size: usize,
-    hash_cache_size_meg: usize,
-    data_cache_size_meg: usize,
-    block_hash: BlockHash,
-    stream_hash: StreamHash,
-) -> Result<()> {
+fn create(archive_dir: &Path, params: &CreateParameters) -> Result<()> {
     // We need to initialize the hash functions as soon as we know them
-    hash::init_block_hashes(block_hash);
+    hash::init_block_hashes(params.block_hash);
 
     fs::create_dir_all(archive_dir)
         .with_context(|| format!("Unable to create archive {:?}", archive_dir))?;
 
     write_config(
         archive_dir,
-        block_size,
-        hash_cache_size_meg,
-        data_cache_size_meg,
-        block_hash,
-        stream_hash,
+        params.block_size,
+        params.hash_cache_size_meg,
+        params.data_cache_size_meg,
+        params.block_hash,
+        params.stream_hash,
+        params.cdc_algorithm.clone(),
     )?;
     create_sub_dir(archive_dir, "data")?;
     create_sub_dir(archive_dir, "streams")?;
     create_sub_dir(archive_dir, "indexes")?;
 
     // Create empty data and hash slab files
-    let mut data_file = MultiFile::create(archive_dir, 1, data_compression, 1)?;
+    let mut data_file = MultiFile::create(archive_dir, 1, params.data_compression, 1)?;
     data_file
         .close()
         .with_context(|| format!("Failed to close data file in {:?}", archive_dir))?;
@@ -161,35 +155,29 @@ fn create(
     Ok(())
 }
 
-pub struct CreateParmeters {
+pub struct CreateParameters {
     pub data_compression: bool,
     pub block_size: usize,
     pub hash_cache_size_meg: usize,
     pub data_cache_size_meg: usize,
     pub block_hash: BlockHash,
     pub stream_hash: StreamHash,
+    pub cdc_algorithm: String,
 }
 
-pub fn default(dir: &Path) -> Result<CreateParmeters> {
-    let block_hash = BlockHash::default();
-    let stream_hash = StreamHash::default();
-    create(
-        dir,
-        true,
-        4096,
-        DEFAULT_DATA_CACHE_SIZE_MEG,
-        DEFAULT_DATA_CACHE_SIZE_MEG,
-        block_hash,
-        stream_hash,
-    )?;
-    Ok(CreateParmeters {
+pub fn default(dir: &Path) -> Result<CreateParameters> {
+    let params = CreateParameters {
         data_compression: true,
         block_size: 4096,
         hash_cache_size_meg: DEFAULT_DATA_CACHE_SIZE_MEG,
         data_cache_size_meg: DEFAULT_DATA_CACHE_SIZE_MEG,
-        block_hash,
-        stream_hash,
-    })
+        block_hash: BlockHash::default(),
+        stream_hash: StreamHash::default(),
+        cdc_algorithm: "gearhash".to_string(),
+    };
+
+    create(dir, &params)?;
+    Ok(params)
 }
 
 pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
@@ -218,15 +206,23 @@ pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
         .parse::<StreamHash>()
         .map_err(|e| anyhow!("Invalid stream hash: {}", e))?;
 
-    create(
-        archive_dir,
+    // Parse CDC algorithm selection
+    let cdc_algorithm = matches
+        .get_one::<String>("CDC_ALGORITHM")
+        .unwrap()
+        .to_string();
+
+    let params = CreateParameters {
         data_compression,
         block_size,
         hash_cache_size_meg,
         data_cache_size_meg,
         block_hash,
         stream_hash,
-    )
+        cdc_algorithm,
+    };
+
+    create(archive_dir, &params)
 }
 
 //-----------------------------------------
