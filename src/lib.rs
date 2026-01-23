@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod cdc;
+pub mod cdc_stats;
 pub mod chunkers;
 pub mod config;
 pub mod content_sensitive_splitter;

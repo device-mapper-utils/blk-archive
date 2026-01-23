@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::archive::*;
 use crate::cdc::{create_cdc, ContentDefinedChunker};
+use crate::cdc_stats::CdcStats;
 use crate::chunkers::*;
 use crate::config;
 use crate::content_sensitive_splitter::*;
@@ -86,6 +87,7 @@ struct DedupHandler<'a> {
     mapping_builder: Arc<Mutex<dyn Builder>>,
 
     stats: DedupStats,
+    cdc_stats: CdcStats,
     archive: Data<'a, MultiFile>,
 }
 
@@ -110,6 +112,7 @@ impl<'a> DedupHandler<'a> {
             first_mapping_slab,
             mapping_builder,
             stats,
+            cdc_stats: CdcStats::new(),
             archive,
         })
     }
@@ -165,6 +168,9 @@ impl<'a> IoVecHandler for DedupHandler<'a> {
 
         if let Some(first_byte) = all_same(iov) {
             self.stats.fill_size += len;
+            // Fill blocks are always "unique" in the sense that they're not deduplicated
+            // against other data chunks (they're just a run-length encoding optimization)
+            self.cdc_stats.record_chunk(len, false);
             self.add_stream_entry(
                 &MapEntry::Fill {
                     byte: first_byte,
@@ -176,7 +182,7 @@ impl<'a> IoVecHandler for DedupHandler<'a> {
         } else {
             let h = hash_256_iov(iov);
             // Note: add_data_entry returns existing entry if present, else returns newly inserted
-            // entry.
+            // entry. data_written == 0 means it was a duplicate.
             let (entry_location, data_written) =
                 self.archive.data_add_with_boundary_check(h, iov, len)?;
             let me = MapEntry::Data {
@@ -185,6 +191,11 @@ impl<'a> IoVecHandler for DedupHandler<'a> {
                 nr_entries: 1,
             };
             self.stats.data_written += data_written;
+
+            // Record CDC stats: if data_written == 0, it was a duplicate
+            let was_duplicate = data_written == 0;
+            self.cdc_stats.record_chunk(len, was_duplicate);
+
             self.add_stream_entry(&me, len)?;
             self.maybe_complete_stream()?;
         }
@@ -217,6 +228,11 @@ impl<'a> DedupHandler<'a> {
     /// Get mapping slab range for this stream
     fn get_mapping_slab_range(&self) -> (u32, u32) {
         (self.first_mapping_slab, self.get_num_mapping_slabs())
+    }
+
+    /// Get a reference to the CDC statistics
+    fn get_cdc_stats(&self) -> &CdcStats {
+        &self.cdc_stats
     }
 }
 
@@ -442,10 +458,19 @@ impl Packer {
             metadata.get_nr_slabs() as u64
         };
 
+        // Get CDC statistics
+        let cdc_stats = handler.get_cdc_stats();
+
         if self.output.json {
             // Should all the values simply be added to the json too?  We can always add entries, but
             // we can never take any away to maintains backwards compatibility with JSON consumers.
-            let result = json!({ "input_file": self.input_path, "stream_id": format!("{stream_id}"), "stats": handler.stats, "hash": input_hex_digest});
+            let result = json!({
+                "input_file": self.input_path,
+                "stream_id": format!("{stream_id}"),
+                "stats": handler.stats,
+                "cdc_stats": cdc_stats,
+                "hash": input_hex_digest
+            });
             println!("{}", to_string_pretty(&result).unwrap());
         } else {
             self.output
@@ -486,6 +511,58 @@ impl Packer {
                 "speed            : {:.2}/s",
                 Size((total_read as f64 / elapsed) as u64)
             ));
+
+            // Output CDC statistics
+            self.output.report.info("");
+            self.output.report.info("CDC Statistics:");
+            self.output
+                .report
+                .info(&format!("  Total chunks     : {}", cdc_stats.total_chunks));
+            self.output.report.info(&format!(
+                "  Unique chunks    : {} ({:.2}%)",
+                cdc_stats.unique_chunks,
+                if cdc_stats.total_chunks > 0 {
+                    (cdc_stats.unique_chunks as f64 / cdc_stats.total_chunks as f64) * 100.0
+                } else {
+                    0.0
+                }
+            ));
+            self.output.report.info(&format!(
+                "  Duplicate chunks : {} ({:.2}%)",
+                cdc_stats.duplicate_chunks,
+                cdc_stats.duplicate_percentage()
+            ));
+            self.output.report.info(&format!(
+                "  Dedup ratio      : {:.2}%",
+                cdc_stats.dedup_ratio() * 100.0
+            ));
+            self.output.report.info(&format!(
+                "  Avg chunk size   : {:.2} KB",
+                cdc_stats.average_chunk_size() / 1024.0
+            ));
+            self.output.report.info(&format!(
+                "  Median chunk size: {:.2} KB",
+                cdc_stats.median_chunk_size() as f64 / 1024.0
+            ));
+            let (min, max) = cdc_stats.min_max_chunk_size();
+            self.output
+                .report
+                .info(&format!("  Chunk size range : {} - {} bytes", min, max));
+
+            // Write histogram to CSV file if there are chunks
+            if cdc_stats.total_chunks > 0 {
+                let histogram_path = format!("cdc-histogram-{}.csv", stream_id);
+                if let Err(e) = cdc_stats.write_histogram_csv(Path::new(&histogram_path)) {
+                    self.output.report.warning(&format!(
+                        "Failed to write CDC histogram to {}: {}",
+                        histogram_path, e
+                    ));
+                } else {
+                    self.output
+                        .report
+                        .info(&format!("  Histogram saved  : {}", histogram_path));
+                }
+            }
         }
 
         // Write stream metadata to binary slab file
