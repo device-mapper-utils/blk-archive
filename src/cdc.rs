@@ -24,7 +24,7 @@ pub enum ChunkingStrategy {
 /// # Example
 ///
 /// ```
-/// use blk_stash::cdc::{ContentDefinedChunker, GearHashCDC, FastCDC};
+/// use blk_stash::cdc::{ContentDefinedChunker, GearHashCDC, FastCDC, MinCDC};
 /// use blk_stash::content_sensitive_splitter::ContentSensitiveSplitter;
 ///
 /// // Use GearHashCDC implementation (gear-based rolling hash)
@@ -32,6 +32,9 @@ pub enum ChunkingStrategy {
 ///
 /// // Use FastCDC implementation (FastCDC algorithm)
 /// let splitter2 = ContentSensitiveSplitter::new(8192, FastCDC::new(8192));
+///
+/// // Use MinCDC implementation (high-performance, uniform distribution)
+/// let splitter3 = ContentSensitiveSplitter::new(8192, MinCDC::new(8192));
 ///
 /// // Or implement your own CDC algorithm:
 /// struct MyCDC;
@@ -209,6 +212,88 @@ impl ContentDefinedChunker for FastCDC {
     }
 }
 
+/// MinCDC implementation using the mincdc crate.
+///
+/// MinCDC chooses chunk boundaries based on the minimum value of a sliding window
+/// over the input data. This approach provides:
+/// - Nearly uniform chunk size distribution between min and max sizes
+/// - Extremely high performance (40+ GB/s on modern hardware)
+/// - Comparable deduplication to other CDC algorithms
+///
+/// This implementation uses MinCdcHash4, which hashes window values for improved
+/// robustness compared to the raw MinCdc4 variant.
+pub struct MinCDC {
+    min_size: usize,
+    max_size: usize,
+}
+
+impl MinCDC {
+    /// Create a new MinCDC chunker with specified size parameters.
+    ///
+    /// # Arguments
+    /// * `avg_size` - The average chunk size (will be used to derive min/max)
+    pub fn new(avg_size: usize) -> Self {
+        // Use similar size ranges as FastCDC for consistency
+        Self::with_sizes(avg_size / 4, avg_size * 4)
+    }
+
+    /// Create a new MinCDC chunker with explicit min and max sizes.
+    pub fn with_sizes(min_size: usize, max_size: usize) -> Self {
+        Self { min_size, max_size }
+    }
+}
+
+impl Default for MinCDC {
+    fn default() -> Self {
+        Self::new(8192) // Default to 8KB average chunk size
+    }
+}
+
+impl ContentDefinedChunker for MinCDC {
+    fn strategy(&self) -> ChunkingStrategy {
+        ChunkingStrategy::BufferBased
+    }
+
+    fn next_match(&mut self, _data: &[u8], _mask: u64) -> Option<usize> {
+        // Not used for buffer-based chunking
+        // This method exists for trait compatibility but should not be called
+        None
+    }
+
+    fn chunk_from_buffers(
+        &mut self,
+        buffers: &VecDeque<Vec<u8>>,
+        start_buffer: usize,
+        start_offset: usize,
+        _min_size: usize,
+        _max_size: usize,
+    ) -> Result<Vec<usize>> {
+        // Create a reader over the unconsumed buffers
+        let reader = VecDequeReader::new_from_position(buffers, start_buffer, start_offset);
+
+        // Use MinCDC ReadChunker to chunk the data
+        // MinCdcHash4 is recommended for robustness
+        let mut chunker = mincdc::ReadChunker::new(
+            reader,
+            self.min_size,
+            self.max_size,
+            mincdc::MinCdcHash4::new(),
+        );
+
+        // Collect all chunk lengths
+        let mut lengths = Vec::new();
+        loop {
+            match chunker.next() {
+                Ok(Some(chunk)) => lengths.push(chunk.len()),
+                Ok(None) => break,
+                Err(e) => return Err(anyhow!("MinCDC error: {}", e)),
+            }
+        }
+
+        Ok(lengths)
+    }
+}
+
 /// Simple fixed-size chunker for testing or as an alternative to CDC.
 ///
 /// This implementation always chunks at fixed boundaries, ignoring content.
@@ -257,12 +342,13 @@ impl ContentDefinedChunker for FixedSizeChunker {
 /// # Example
 ///
 /// ```
-/// use blk_stash::cdc::{ContentDefinedChunker, GearHashCDC, FastCDC, FixedSizeChunker};
+/// use blk_stash::cdc::{ContentDefinedChunker, GearHashCDC, FastCDC, MinCDC, FixedSizeChunker};
 ///
 /// fn create_chunker(algorithm: &str) -> Box<dyn ContentDefinedChunker> {
 ///     match algorithm {
 ///         "gearhash" => Box::new(GearHashCDC::new()),
 ///         "fastcdc" => Box::new(FastCDC::new(8192)),
+///         "mincdc" => Box::new(MinCDC::new(8192)),
 ///         "fixed" => Box::new(FixedSizeChunker::new()),
 ///         _ => Box::new(GearHashCDC::new()),
 ///     }
@@ -296,7 +382,7 @@ impl ContentDefinedChunker for Box<dyn ContentDefinedChunker> {
 /// Create a CDC instance from an algorithm name and average chunk size.
 ///
 /// # Arguments
-/// * `algorithm` - The CDC algorithm name ("gearhash", "fastcdc", or "fixed")
+/// * `algorithm` - The CDC algorithm name ("gearhash", "fastcdc", "mincdc", or "fixed")
 /// * `avg_size` - Average chunk size in bytes
 ///
 /// # Returns
@@ -307,12 +393,15 @@ impl ContentDefinedChunker for Box<dyn ContentDefinedChunker> {
 /// ```
 /// use blk_stash::cdc::create_cdc;
 ///
-/// let cdc = create_cdc("gearhash", 8192).unwrap();
+/// let gearhash = create_cdc("gearhash", 8192).unwrap();
+/// let fastcdc = create_cdc("fastcdc", 8192).unwrap();
+/// let mincdc = create_cdc("mincdc", 8192).unwrap();
 /// ```
 pub fn create_cdc(algorithm: &str, avg_size: usize) -> Result<Box<dyn ContentDefinedChunker>> {
     match algorithm {
         "gearhash" => Ok(Box::new(GearHashCDC::new())),
         "fastcdc" => Ok(Box::new(FastCDC::new(avg_size))),
+        "mincdc" => Ok(Box::new(MinCDC::new(avg_size))),
         "fixed" => Ok(Box::new(FixedSizeChunker::new())),
         _ => Err(anyhow!("Unknown CDC algorithm: {}", algorithm)),
     }
@@ -391,6 +480,68 @@ mod tests {
     }
 
     #[test]
+    fn test_mincdc_implements_trait() {
+        use std::collections::VecDeque;
+
+        let mut cdc = MinCDC::new(8192);
+        let data = vec![0u8; 16384];
+
+        // MinCDC uses buffer-based chunking
+        assert_eq!(cdc.strategy(), ChunkingStrategy::BufferBased);
+
+        // Create a VecDeque with the data
+        let mut buffers = VecDeque::new();
+        buffers.push_back(data);
+
+        // MinCDC should find chunk boundaries
+        let chunks = cdc.chunk_from_buffers(&buffers, 0, 0, 2048, 32768).unwrap();
+        assert!(!chunks.is_empty());
+
+        // Total of chunks should equal input size
+        let total: usize = chunks.iter().sum();
+        assert_eq!(total, 16384);
+    }
+
+    #[test]
+    fn test_mincdc_with_sizes() {
+        use std::collections::VecDeque;
+
+        let mut cdc = MinCDC::with_sizes(2048, 32768);
+        let data = vec![0u8; 65536];
+
+        let mut buffers = VecDeque::new();
+        buffers.push_back(data);
+
+        let chunks = cdc.chunk_from_buffers(&buffers, 0, 0, 2048, 32768).unwrap();
+        assert!(!chunks.is_empty());
+
+        // Verify all chunks are within bounds
+        for chunk_size in &chunks {
+            assert!(
+                *chunk_size >= 2048 || chunks.len() == 1,
+                "Chunk too small: {}",
+                chunk_size
+            );
+            assert!(*chunk_size <= 32768, "Chunk too large: {}", chunk_size);
+        }
+
+        // Total should match input
+        let total: usize = chunks.iter().sum();
+        assert_eq!(total, 65536);
+    }
+
+    #[test]
+    fn test_mincdc_empty_data() {
+        use std::collections::VecDeque;
+
+        let mut cdc = MinCDC::new(8192);
+        let buffers = VecDeque::new();
+
+        let chunks = cdc.chunk_from_buffers(&buffers, 0, 0, 2048, 32768).unwrap();
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
     fn test_boxed_chunker() {
         use std::collections::VecDeque;
 
@@ -421,6 +572,7 @@ mod tests {
             match algorithm {
                 "gearhash" => Box::new(GearHashCDC::new()),
                 "fastcdc" => Box::new(FastCDC::new(8192)),
+                "mincdc" => Box::new(MinCDC::new(8192)),
                 "fixed" => Box::new(FixedSizeChunker::new()),
                 _ => Box::new(GearHashCDC::new()),
             }
@@ -443,9 +595,57 @@ mod tests {
             .unwrap();
         assert!(!chunks.is_empty());
 
+        // MinCDC uses buffer-based strategy
+        let mut mincdc = create_chunker("mincdc");
+        assert_eq!(mincdc.strategy(), ChunkingStrategy::BufferBased);
+        let mut buffers = VecDeque::new();
+        buffers.push_back(data.clone());
+        let chunks = mincdc
+            .chunk_from_buffers(&buffers, 0, 0, 2048, 32768)
+            .unwrap();
+        assert!(!chunks.is_empty());
+
         // Fixed uses incremental strategy
         let mut fixed = create_chunker("fixed");
         assert_eq!(fixed.strategy(), ChunkingStrategy::Incremental);
         assert_eq!(fixed.next_match(&data, 0), Some(16384));
+    }
+
+    #[test]
+    fn test_create_cdc_factory() {
+        use std::collections::VecDeque;
+
+        // Test that create_cdc works for all supported algorithms
+        let algorithms = vec!["gearhash", "fastcdc", "mincdc", "fixed"];
+
+        for algorithm in algorithms {
+            let cdc = create_cdc(algorithm, 8192);
+            assert!(
+                cdc.is_ok(),
+                "Failed to create CDC for algorithm: {}",
+                algorithm
+            );
+        }
+
+        // Test that mincdc specifically works via factory
+        let mut mincdc = create_cdc("mincdc", 8192).unwrap();
+        assert_eq!(mincdc.strategy(), ChunkingStrategy::BufferBased);
+
+        let data = vec![1u8; 16384];
+        let mut buffers = VecDeque::new();
+        buffers.push_back(data);
+
+        let chunks = mincdc
+            .chunk_from_buffers(&buffers, 0, 0, 2048, 32768)
+            .unwrap();
+        assert!(!chunks.is_empty());
+
+        // Verify total matches input
+        let total: usize = chunks.iter().sum();
+        assert_eq!(total, 16384);
+
+        // Test unknown algorithm returns error
+        let result = create_cdc("unknown", 8192);
+        assert!(result.is_err());
     }
 }

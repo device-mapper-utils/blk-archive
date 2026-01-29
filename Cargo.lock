@@ -213,6 +213,7 @@ dependencies = [
  "linked-hash-map",
  "lru",
  "memmap2",
+ "mincdc",
  "nix",
  "nom",
  "num_enum",
@@ -920,6 +921,12 @@ checksum = "843a98750cd611cc2965a8213b53b43e715f13c37a9e096c6408e69990961db7"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "mincdc"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d2923e26fcf6c3699531d13e141a4c18bb0852d5614da154805dcf6348fbf21"
 
 [[package]]
 name = "minimal-lexical"

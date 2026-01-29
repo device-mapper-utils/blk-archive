@@ -142,7 +142,7 @@ pub fn build_cli() -> clap::Command {
                         .long("cdc-algorithm")
                         .value_name("CDC_ALGORITHM")
                         .num_args(1)
-                        .value_parser(["gearhash", "fastcdc"])
+                        .value_parser(["gearhash", "fastcdc", "mincdc"])
                         .default_value("gearhash")
                         .help_heading("Optional Options"),
                 ),
