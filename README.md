@@ -1,11 +1,14 @@
+
+![Project Logo](doc/assets/blkslash.png)
+
 # Introduction
 
-blk-archive is a tool for archiving block devices.
+blk-stash is a tool for archiving block devices.
 
 Archived data is deduplicated, compressed and stored in a directory
 within a file system.
 
-blk-archive is not a complete backup solution.  But it may well make an
+blk-stash is not a complete backup solution.  But it may well make an
 excellent first step in a backup process.  For instance you may wish to
 sync the archive directory to cloud storage, or write it to tape.
 
@@ -36,7 +39,7 @@ also use this tool.
 
 # Building
 
-blk-archive is written in Rust.  You will need to install a recent
+blk-stash is written in Rust.  You will need to install a recent
 tool chain.  I recommend using *rustup*.
 
 ### Build dependencies

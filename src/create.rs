@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::ArgMatches;
 use std::fs;
 use std::fs::OpenOptions;
@@ -7,11 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thinp::report::*;
 
-use crate::config::*;
-use crate::cuckoo_filter::*;
+use crate::hash::{BlockHash, StreamHash};
 use crate::paths;
 use crate::paths::*;
-use crate::slab::builder::*;
+use crate::recovery;
+use crate::slab::{builder::*, data_cache::DEFAULT_DATA_CACHE_SIZE_MEG, MultiFile};
+use crate::stream_archive;
+use crate::{config::*, cuckoo_filter};
+use crate::{cuckoo_filter::*, hash};
 
 //-----------------------------------------
 
@@ -19,7 +22,8 @@ fn create_sub_dir(root: &Path, sub: &str) -> Result<()> {
     let mut p = PathBuf::new();
     p.push(root);
     p.push(sub);
-    fs::create_dir(p)?;
+    fs::create_dir(&p)
+        .with_context(|| format!("Failed to create subdirectory '{}' in {:?}", sub, root))?;
     Ok(())
 }
 
@@ -28,6 +32,9 @@ fn write_config(
     block_size: usize,
     hash_cache_size_meg: usize,
     data_cache_size_meg: usize,
+    block_hash: BlockHash,
+    stream_hash: StreamHash,
+    cdc_algorithm: String,
 ) -> Result<()> {
     let mut p = PathBuf::new();
     p.push(root);
@@ -38,16 +45,20 @@ fn write_config(
         .write(true)
         .create(true)
         .truncate(true)
-        .open(p)?;
+        .open(&p)
+        .with_context(|| format!("Failed to create config file at {:?}", p))?;
 
     let config = Config {
         block_size,
-        splitter_alg: "RollingHashV0".to_string(),
+        splitter_alg: cdc_algorithm,
         hash_cache_size_meg,
         data_cache_size_meg,
+        block_hash,
+        stream_hash,
     };
 
-    write!(output, "{}", &serde_yaml_ng::to_string(&config).unwrap())?;
+    write!(output, "{}", &serde_yaml_ng::to_string(&config).unwrap())
+        .with_context(|| format!("Failed to write config to {:?}", p))?;
     Ok(())
 }
 
@@ -86,45 +97,132 @@ fn numeric_option<T: std::str::FromStr>(matches: &ArgMatches, name: &str, dflt: 
 }
 */
 
+fn create(archive_dir: &Path, params: &CreateParameters) -> Result<()> {
+    // We need to initialize the hash functions as soon as we know them
+    hash::init_block_hashes(params.block_hash);
+
+    fs::create_dir_all(archive_dir)
+        .with_context(|| format!("Unable to create archive {:?}", archive_dir))?;
+
+    write_config(
+        archive_dir,
+        params.block_size,
+        params.hash_cache_size_meg,
+        params.data_cache_size_meg,
+        params.block_hash,
+        params.stream_hash,
+        params.cdc_algorithm.clone(),
+    )?;
+    create_sub_dir(archive_dir, "data")?;
+    create_sub_dir(archive_dir, "streams")?;
+    create_sub_dir(archive_dir, "indexes")?;
+
+    // Create empty data and hash slab files
+    let mut data_file = MultiFile::create(archive_dir, 1, params.data_compression, 1)?;
+    data_file
+        .close()
+        .with_context(|| format!("Failed to close data file in {:?}", archive_dir))?;
+
+    let hashes_path = hashes_path(archive_dir);
+    let mut hashes_file = SlabFileBuilder::create(&hashes_path)
+        .queue_depth(1)
+        .compressed(false)
+        .build()?;
+    hashes_file
+        .close()
+        .with_context(|| format!("Failed to close hashes file at {:?}", hashes_path))?;
+
+    // Create the empty stream archive
+    stream_archive::StreamArchive::create(archive_dir, 1)?.close()?;
+
+    // Write empty index
+    let index_path = paths::index_path(archive_dir);
+    let index = CuckooFilter::with_capacity(cuckoo_filter::INITIAL_SIZE);
+    index
+        .write(&index_path)
+        .with_context(|| format!("Failed to write initial index to {:?}", index_path))?;
+
+    // Create initial recovery checkpoint
+    let checkpoint_path = archive_dir.join(recovery::check_point_file());
+    let checkpoint = recovery::create_checkpoint_from_files(archive_dir, 0)?;
+    checkpoint.write(&checkpoint_path).with_context(|| {
+        format!(
+            "Failed to write initial checkpoint to {:?}",
+            checkpoint_path
+        )
+    })?;
+
+    Ok(())
+}
+
+pub struct CreateParameters {
+    pub data_compression: bool,
+    pub block_size: usize,
+    pub hash_cache_size_meg: usize,
+    pub data_cache_size_meg: usize,
+    pub block_hash: BlockHash,
+    pub stream_hash: StreamHash,
+    pub cdc_algorithm: String,
+}
+
+pub fn default(dir: &Path) -> Result<CreateParameters> {
+    let params = CreateParameters {
+        data_compression: true,
+        block_size: 4096,
+        hash_cache_size_meg: DEFAULT_DATA_CACHE_SIZE_MEG,
+        data_cache_size_meg: DEFAULT_DATA_CACHE_SIZE_MEG,
+        block_hash: BlockHash::default(),
+        stream_hash: StreamHash::default(),
+        cdc_algorithm: "gearhash".to_string(),
+    };
+
+    create(dir, &params)?;
+    Ok(params)
+}
+
 pub fn run(matches: &ArgMatches, report: Arc<Report>) -> Result<()> {
-    let dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap());
+    let archive_dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap());
     let data_compression = matches.get_one::<String>("DATA_COMPRESSION").unwrap() == "y";
 
     let mut block_size = numeric_option::<usize>(matches, "BLOCK_SIZE", 4096)?;
     let new_block_size = adjust_block_size(block_size);
     if new_block_size != block_size {
-        report.info(&format!("adjusting block size to {new_block_size}"));
+        report.info(&format!("adjusting block size to {}", new_block_size));
         block_size = new_block_size;
     }
-    let hash_cache_size_meg = numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", 1024)?;
-    let data_cache_size_meg = numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", 1024)?;
+    let hash_cache_size_meg =
+        numeric_option::<usize>(matches, "HASH_CACHE_SIZE_MEG", DEFAULT_DATA_CACHE_SIZE_MEG)?;
+    let data_cache_size_meg =
+        numeric_option::<usize>(matches, "DATA_CACHE_SIZE_MEG", DEFAULT_DATA_CACHE_SIZE_MEG)?;
 
-    fs::create_dir(dir)?;
-    write_config(dir, block_size, hash_cache_size_meg, data_cache_size_meg)?;
-    create_sub_dir(dir, "data")?;
-    create_sub_dir(dir, "streams")?;
-    create_sub_dir(dir, "indexes")?;
+    // Parse hash algorithm selections
+    let block_hash_str = matches.get_one::<String>("BLOCK_HASH").unwrap();
+    let block_hash = block_hash_str
+        .parse::<BlockHash>()
+        .map_err(|e| anyhow!("Invalid block hash: {}", e))?;
 
-    std::env::set_current_dir(dir)?;
+    let stream_hash_str = matches.get_one::<String>("STREAM_HASH").unwrap();
+    let stream_hash = stream_hash_str
+        .parse::<StreamHash>()
+        .map_err(|e| anyhow!("Invalid stream hash: {}", e))?;
 
-    // Create empty data and hash slab files
-    let mut data_file = SlabFileBuilder::create(data_path())
-        .queue_depth(1)
-        .compressed(data_compression)
-        .build()?;
-    data_file.close()?;
+    // Parse CDC algorithm selection
+    let cdc_algorithm = matches
+        .get_one::<String>("CDC_ALGORITHM")
+        .unwrap()
+        .to_string();
 
-    let mut hashes_file = SlabFileBuilder::create(hashes_path())
-        .queue_depth(1)
-        .compressed(false)
-        .build()?;
-    hashes_file.close()?;
+    let params = CreateParameters {
+        data_compression,
+        block_size,
+        hash_cache_size_meg,
+        data_cache_size_meg,
+        block_hash,
+        stream_hash,
+        cdc_algorithm,
+    };
 
-    // Write empty index
-    let index = CuckooFilter::with_capacity(1 << 10);
-    index.write(paths::index_path())?;
-
-    Ok(())
+    create(archive_dir, &params)
 }
 
 //-----------------------------------------
