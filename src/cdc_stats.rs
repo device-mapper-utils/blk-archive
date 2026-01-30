@@ -25,6 +25,9 @@ pub struct CdcStats {
     /// Histogram of chunk sizes in power-of-2 buckets for easier visualization
     /// bucket_index -> count, where bucket size = 2^bucket_index
     pub size_histogram_pow2: BTreeMap<u32, u64>,
+
+    /// Histogram of duplicate chunks by size: size -> duplicate_count
+    pub duplicate_histogram: BTreeMap<u64, u64>,
 }
 
 impl CdcStats {
@@ -43,6 +46,8 @@ impl CdcStats {
 
         if was_duplicate {
             self.duplicate_chunks += 1;
+            // Track duplicates by size
+            *self.duplicate_histogram.entry(chunk_size).or_insert(0) += 1;
         } else {
             self.unique_chunks += 1;
             self.bytes_written += chunk_size;
@@ -186,10 +191,11 @@ impl CdcStats {
         use std::io::Write;
 
         let mut file = std::fs::File::create(path)?;
-        writeln!(file, "chunk_size_bytes,count")?;
+        writeln!(file, "chunk_size_bytes,count,duplicates")?;
 
         for (size, count) in &self.size_histogram {
-            writeln!(file, "{},{}", size, count)?;
+            let duplicates = self.duplicate_histogram.get(size).copied().unwrap_or(0);
+            writeln!(file, "{},{},{}", size, count, duplicates)?;
         }
 
         Ok(())
@@ -276,5 +282,25 @@ mod tests {
         stats.record_chunk(3000, false);
 
         assert!((stats.average_chunk_size() - 2000.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_duplicate_histogram() {
+        let mut stats = CdcStats::new();
+
+        // Record chunks with duplicates at specific sizes
+        stats.record_chunk(4096, false); // unique
+        stats.record_chunk(4096, true); // duplicate
+        stats.record_chunk(4096, true); // duplicate
+        stats.record_chunk(8192, false); // unique
+        stats.record_chunk(8192, true); // duplicate
+
+        // Check total histogram counts both unique and duplicates
+        assert_eq!(stats.size_histogram.get(&4096), Some(&3));
+        assert_eq!(stats.size_histogram.get(&8192), Some(&2));
+
+        // Check duplicate histogram only counts duplicates
+        assert_eq!(stats.duplicate_histogram.get(&4096), Some(&2));
+        assert_eq!(stats.duplicate_histogram.get(&8192), Some(&1));
     }
 }
