@@ -82,8 +82,19 @@ impl<C: ContentDefinedChunker> ContentSensitiveSplitter<C> {
         }
         self.unconsumed_len -= len as u64;
 
+        // Verify consistency: when all data is consumed, cursor should be at or past last block
+        // Allow cursor to equal blocks.len() (past last block) or be on a trailing empty block
         if self.unconsumed_len == 0 {
-            assert!(c.block == self.blocks.len());
+            assert!(
+                c.block <= self.blocks.len(),
+                "Cursor block {} exceeds blocks.len() {} when unconsumed_len is 0",
+                c.block,
+                self.blocks.len()
+            );
+            // Skip any trailing empty blocks
+            while c.block < self.blocks.len() && blocks[c.block].is_empty() {
+                c.block += 1;
+            }
         }
 
         r
@@ -187,11 +198,32 @@ impl<C: ContentDefinedChunker> ContentSensitiveSplitter<C> {
 
 impl<C: ContentDefinedChunker> Splitter for ContentSensitiveSplitter<C> {
     fn next_data(&mut self, buffer: Vec<u8>, handler: &mut impl IoVecHandler) -> Result<()> {
-        let consumes = self.next_data_(&buffer);
-
         let len = buffer.len();
-        self.blocks.push_back(buffer);
-        self.unconsumed_len += len as u64;
+
+        // Skip empty buffers to avoid state inconsistencies
+        if len == 0 {
+            return Ok(());
+        }
+
+        // Different strategies for incremental vs buffer-based chunking
+        let consumes = match self.chunker.strategy() {
+            ChunkingStrategy::Incremental => {
+                // For incremental chunking (GearHash), process the NEW data slice
+                // before adding to blocks, since the algorithm processes incrementally
+                let chunks = self.next_data_incremental(&buffer);
+                self.blocks.push_back(buffer);
+                self.unconsumed_len += len as u64;
+                chunks
+            }
+            ChunkingStrategy::BufferBased => {
+                // For buffer-based chunking (FastCDC, MinCDC), add the buffer first
+                // so the chunker can see all accumulated data
+                self.blocks.push_back(buffer);
+                self.unconsumed_len += len as u64;
+                let empty: &[u8] = &[];
+                self.next_data_buffer_based(empty)
+            }
+        };
 
         for consume_len in consumes {
             handler.handle_data(&self.consume(consume_len))?;

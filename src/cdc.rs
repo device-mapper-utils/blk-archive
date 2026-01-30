@@ -142,7 +142,6 @@ impl ContentDefinedChunker for GearHashCDC {
 /// instances for tiny buffers.
 pub struct FastCDC {
     min_size: usize,
-    avg_size: usize,
     max_size: usize,
 }
 
@@ -151,15 +150,17 @@ impl FastCDC {
     ///
     /// # Arguments
     /// * `avg_size` - The average chunk size (will be used to derive min/max)
-    pub fn new(_avg_size: usize) -> Self {
-        Self::with_sizes(512, 2048, 1024 * 8)
+    pub fn new(avg_size: usize) -> Self {
+        // Derive min/max from avg_size similar to FastCDC defaults
+        let min_size = avg_size / 4;
+        let max_size = avg_size * 4;
+        Self::with_sizes(min_size, max_size)
     }
 
-    /// Create a new FastCDC chunker with explicit min, avg, and max sizes.
-    pub fn with_sizes(min_size: usize, avg_size: usize, max_size: usize) -> Self {
+    /// Create a new FastCDC chunker with explicit min and max sizes.
+    pub fn with_sizes(min_size: usize, max_size: usize) -> Self {
         Self {
             min_size,
-            avg_size,
             max_size,
         }
     }
@@ -187,18 +188,24 @@ impl ContentDefinedChunker for FastCDC {
         buffers: &VecDeque<Vec<u8>>,
         start_buffer: usize,
         start_offset: usize,
-        _min_size: usize,
-        _max_size: usize,
+        min_size: usize,
+        max_size: usize,
     ) -> Result<Vec<usize>> {
         // Create a reader over the unconsumed buffers
         let reader = VecDequeReader::new_from_position(buffers, start_buffer, start_offset);
 
+        // Use the provided min/max sizes, or fall back to instance defaults
+        // The avg_size is computed as the geometric mean of min and max
+        let min = if min_size > 0 { min_size } else { self.min_size };
+        let max = if max_size > 0 { max_size } else { self.max_size };
+        let avg = ((min as f64 * max as f64).sqrt() as usize).clamp(min, max);
+
         // Use StreamCDC to chunk the data
         let chunker = fastcdc::v2020::StreamCDC::new(
             reader,
-            self.min_size as u32,
-            self.avg_size as u32,
-            self.max_size as u32,
+            min as u32,
+            avg as u32,
+            max as u32,
         );
 
         // Collect all chunk lengths
@@ -265,18 +272,22 @@ impl ContentDefinedChunker for MinCDC {
         buffers: &VecDeque<Vec<u8>>,
         start_buffer: usize,
         start_offset: usize,
-        _min_size: usize,
-        _max_size: usize,
+        min_size: usize,
+        max_size: usize,
     ) -> Result<Vec<usize>> {
         // Create a reader over the unconsumed buffers
         let reader = VecDequeReader::new_from_position(buffers, start_buffer, start_offset);
+
+        // Use the provided min/max sizes, or fall back to instance defaults
+        let min = if min_size > 0 { min_size } else { self.min_size };
+        let max = if max_size > 0 { max_size } else { self.max_size };
 
         // Use MinCDC ReadChunker to chunk the data
         // MinCdcHash4 is recommended for robustness
         let mut chunker = mincdc::ReadChunker::new(
             reader,
-            self.min_size,
-            self.max_size,
+            min,
+            max,
             mincdc::MinCdcHash4::new(),
         );
 
@@ -458,7 +469,7 @@ mod tests {
     fn test_fastcdc_with_sizes() {
         use std::collections::VecDeque;
 
-        let mut cdc = FastCDC::with_sizes(2048, 8192, 32768);
+        let mut cdc = FastCDC::with_sizes(2048, 32768);
         let data = vec![0u8; 16384];
 
         let mut buffers = VecDeque::new();
