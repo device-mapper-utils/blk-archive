@@ -5,7 +5,6 @@ use io::{Read, Seek, Write};
 use serde_json::json;
 use serde_json::to_string_pretty;
 use size_display::Size;
-use std::env;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -36,28 +35,35 @@ trait UnpackDest {
     fn complete(&mut self) -> Result<String>;
 }
 
-struct Unpacker<D: UnpackDest> {
-    stream_file: SlabFile,
-    archive: archive::Data,
+struct Unpacker<D: UnpackDest, S: SlabStorage = SlabFile<'static>> {
+    stream_file: SlabFile<'static>,
+    archive: archive::Data<'static, S>,
     dest: D,
 }
 
-impl<D: UnpackDest> Unpacker<D> {
+impl<D: UnpackDest> Unpacker<D, MultiFile> {
     // Assumes current directory is the root of the archive.
-    fn new(stream: &str, cache_nr_entries: usize, dest: D) -> Result<Self> {
-        let data_file = SlabFileBuilder::open(data_path())
-            .cache_nr_entries(cache_nr_entries)
-            .build()?;
-        let hashes_file = Arc::new(Mutex::new(SlabFileBuilder::open(hashes_path()).build()?));
-        let stream_file = SlabFileBuilder::open(stream_path(stream)).build()?;
+    fn new(archive_dir: &Path, stream: &str, cache_nr_entries: usize, dest: D) -> Result<Self> {
+        let data_file = MultiFile::open_for_read(archive_dir, cache_nr_entries)?;
+        let hashes_file = Arc::new(Mutex::new(
+            SlabFileBuilder::open(hashes_path(archive_dir)).build()?,
+        ));
+        let stream_file = SlabFileBuilder::open(stream_path(archive_dir, stream)).build()?;
 
         Ok(Self {
             stream_file,
-            archive: archive::Data::new(data_file, hashes_file, cache_nr_entries)?,
+            archive: archive::Data::new(
+                &PathBuf::from(archive_dir),
+                data_file,
+                hashes_file,
+                cache_nr_entries,
+            )?,
             dest,
         })
     }
+}
 
+impl<D: UnpackDest, S: SlabStorage> Unpacker<D, S> {
     fn unpack_entry(&mut self, e: &MapEntry) -> Result<()> {
         use MapEntry::*;
         match e {
@@ -296,7 +302,12 @@ impl ThinDest {
 
     fn read(&mut self, len: u64) -> Result<Vec<u8>> {
         let mut buf = vec![0; len as usize];
-        self.output.read_exact(&mut buf[..])?;
+        self.output.read_exact(&mut buf[..]).with_context(|| {
+            format!(
+                "ThinDest:failed to read {} bytes from output at position {}",
+                len, self.pos
+            )
+        })?;
         self.pos += len;
         Ok(buf)
     }
@@ -428,22 +439,22 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
             .open(output_file)
             .context("Couldn't open output")?
     };
-    env::set_current_dir(archive_dir)?;
-    let stream_cfg = config::read_stream_config(stream)?;
+
+    let stream_cfg = config::read_stream_config(&archive_dir, stream)?;
 
     report_output
         .report
         .set_title(&format!("Unpacking {} ...", output_file.display()));
     let result = if create {
-        let config = config::read_config(".", matches)?;
+        let config = config::read_config(&archive_dir, matches)?;
         let cache_nr_entries = (1024 * 1024 * config.data_cache_size_meg) / SLAB_SIZE_TARGET;
 
         let dest = ThickDest {
             output,
             digest: blake3::Hasher::new(),
         };
-        let mut u = Unpacker::new(stream, cache_nr_entries, dest)?;
-        u.unpack(report_output, stream_cfg.size)?
+        let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
+        u.unpack(report_output, stream_cfg.size)
     } else {
         // Check the size matches the stream size.
         let stream_size = stream_cfg.size;
@@ -452,7 +463,7 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
             return Err(anyhow!("Destination size doesn't not match stream size"));
         }
 
-        let config = config::read_config(".", matches)?;
+        let config = config::read_config(&archive_dir, matches)?;
         let cache_nr_entries = (1024 * 1024 * config.data_cache_size_meg) / SLAB_SIZE_TARGET;
 
         if is_thin_device(output_file)? {
@@ -472,22 +483,23 @@ pub fn run_unpack(matches: &ArgMatches, report_output: Arc<Output>) -> Result<()
                 writes_avoided: 0,
                 digest: blake3::Hasher::new(),
             };
-            let mut u = Unpacker::new(stream, cache_nr_entries, dest)?;
-            u.unpack(report_output, stream_size)?
+            let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
+            u.unpack(report_output, stream_size)
         } else {
             let dest = ThickDest {
                 output,
                 digest: blake3::Hasher::new(),
             };
-            let mut u = Unpacker::new(stream, cache_nr_entries, dest)?;
-            u.unpack(report_output, stream_size)?
+            let mut u = Unpacker::new(&archive_dir, stream, cache_nr_entries, dest)?;
+            u.unpack(report_output, stream_size)
         }
     };
-    compare_hashes(stream_cfg.source_sig, result)?;
+    compare_hashes(stream_cfg.source_sig, result?)?;
     Ok(())
 }
 
 fn run_verify_stream(
+    archive_dir: &Path,
     stream_id: &str,
     report_output: Arc<Output>,
     ouput_size: u64,
@@ -500,7 +512,7 @@ fn run_verify_stream(
     let dest = ValidateStream {
         digest: blake3::Hasher::new(),
     };
-    let mut u = Unpacker::new(stream_id, cache_nr_entries, dest)?;
+    let mut u = Unpacker::new(archive_dir, stream_id, cache_nr_entries, dest)?;
     u.unpack(report_output, ouput_size)
 }
 
@@ -699,6 +711,7 @@ fn thin_verifier(input_file: &Path) -> Result<VerifyDest> {
 }
 
 fn run_verify_device_or_file(
+    archive_dir: &Path,
     input_file: PathBuf,
     output: Arc<Output>,
     stream_id: &str,
@@ -717,7 +730,7 @@ fn run_verify_device_or_file(
         thick_verifier(&input_file)?
     };
 
-    let mut u = Unpacker::new(stream_id, cache_nr_entries, dest)?;
+    let mut u = Unpacker::new(archive_dir, stream_id, cache_nr_entries, dest)?;
     u.unpack(output, size)
 }
 
@@ -736,8 +749,6 @@ fn compare_hashes(stored: Option<String>, calculated_digest: String) -> Result<(
 
 pub fn run_verify(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
     let archive_dir = Path::new(matches.get_one::<String>("ARCHIVE").unwrap()).canonicalize()?;
-
-    // We have to do the canonicalize before we set the CWD
     let input_file = if matches.contains_id("INPUT") {
         let p = Path::new(matches.get_one::<String>("INPUT").unwrap());
         p.canonicalize()
@@ -746,19 +757,24 @@ pub fn run_verify(matches: &ArgMatches, output: Arc<Output>) -> Result<()> {
         PathBuf::new()
     };
 
-    env::set_current_dir(archive_dir)?;
-
-    let config = config::read_config(".", matches)?;
+    let config = config::read_config(&archive_dir, matches)?;
     let cache_nr_entries = (1024 * 1024 * config.data_cache_size_meg) / SLAB_SIZE_TARGET;
 
     let stream = matches.get_one::<String>("STREAM").unwrap();
-    let stream_cfg = config::read_stream_config(stream)?;
+    let stream_cfg = config::read_stream_config(&archive_dir, stream)?;
     let stored_hash = stream_cfg.source_sig;
 
     let calculated_hash = if matches.get_flag("internal") {
-        run_verify_stream(stream, output, stream_cfg.size, cache_nr_entries)?
+        run_verify_stream(
+            &archive_dir,
+            stream,
+            output,
+            stream_cfg.size,
+            cache_nr_entries,
+        )?
     } else {
         run_verify_device_or_file(
+            &archive_dir,
             input_file,
             output,
             stream,

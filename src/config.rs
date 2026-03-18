@@ -57,8 +57,8 @@ pub struct StreamConfig {
     pub source_sig: Option<String>,
 }
 
-pub fn read_stream_config(stream_id: &str) -> Result<StreamConfig> {
-    let p = stream_config(stream_id);
+pub fn read_stream_config(base: &Path, stream_id: &str) -> Result<StreamConfig> {
+    let p = stream_config(base, stream_id);
     let input =
         fs::read_to_string(&p).with_context(|| format!("couldn't read stream config '{:?}", &p))?;
     let config: StreamConfig =
@@ -66,8 +66,9 @@ pub fn read_stream_config(stream_id: &str) -> Result<StreamConfig> {
     Ok(config)
 }
 
-pub fn write_stream_config(stream_id: &str, cfg: &StreamConfig) -> Result<()> {
-    let p = stream_config(stream_id);
+pub fn write_stream_config(archive_dir: &Path, stream_id: &str, cfg: &StreamConfig) -> Result<()> {
+    let p = stream_config(archive_dir, stream_id);
+    let stream_file = p.to_path_buf();
     let mut output = fs::OpenOptions::new()
         .read(false)
         .write(true)
@@ -75,7 +76,9 @@ pub fn write_stream_config(stream_id: &str, cfg: &StreamConfig) -> Result<()> {
         .truncate(true)
         .open(p)?;
     let yaml = serde_yaml_ng::to_string(cfg).unwrap();
-    output.write_all(yaml.as_bytes())?;
+    output
+        .write_all(yaml.as_bytes())
+        .with_context(|| format!("Failed to write stream config to {:?}", stream_file))?;
     Ok(())
 }
 
