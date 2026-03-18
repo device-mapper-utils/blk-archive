@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 //------------------------------------------------
 
+pub const DEFAULT_DATA_CACHE_SIZE_MEG: usize = 1024;
+
 /// A cache for slab data that uses an LRU eviction policy.
 ///
 /// This cache stores data blocks indexed by slab number and tracks cache hits and misses.
