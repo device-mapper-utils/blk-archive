@@ -3,10 +3,7 @@ use chrono::prelude::*;
 use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-
-use crate::paths::*;
 
 //-----------------------------------------
 
@@ -45,7 +42,7 @@ pub fn read_config<P: AsRef<Path>>(root: P, overrides: &ArgMatches) -> Result<Co
 
 //-----------------------------------------
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct StreamConfig {
     pub name: Option<String>,
     pub source_path: String,
@@ -55,28 +52,12 @@ pub struct StreamConfig {
     pub packed_size: u64,
     pub thin_id: Option<u32>,
     pub source_sig: Option<String>,
-}
 
-pub fn read_stream_config(stream_id: &str) -> Result<StreamConfig> {
-    let p = stream_config(stream_id);
-    let input =
-        fs::read_to_string(&p).with_context(|| format!("couldn't read stream config '{:?}", &p))?;
-    let config: StreamConfig =
-        serde_yaml_ng::from_str(&input).context("couldn't parse stream config file")?;
-    Ok(config)
-}
-
-pub fn write_stream_config(stream_id: &str, cfg: &StreamConfig) -> Result<()> {
-    let p = stream_config(stream_id);
-    let mut output = fs::OpenOptions::new()
-        .read(false)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(p)?;
-    let yaml = serde_yaml_ng::to_string(cfg).unwrap();
-    output.write_all(yaml.as_bytes())?;
-    Ok(())
+    // Stream mapping location in binary format
+    #[serde(default)]
+    pub first_mapping_slab: u32,
+    #[serde(default)]
+    pub num_mapping_slabs: u32,
 }
 
 pub fn now() -> String {
@@ -106,6 +87,8 @@ mod config_tests {
             packed_size: u64::MAX,
             thin_id: None,
             source_sig: None,
+            first_mapping_slab: 0,
+            num_mapping_slabs: 0,
         };
 
         let ser = serde_yaml_ng::to_string(&config).unwrap();

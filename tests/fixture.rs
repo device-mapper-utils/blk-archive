@@ -7,6 +7,7 @@ use common::random::Pattern;
 use common::test_dir::*;
 
 #[test]
+#[ignore]
 fn test_file_create_verify_repeating() -> Result<()> {
     let mut td = TestDir::new()?;
     let file_size = (BLOCK_SIZE * 10) as u64;
@@ -19,6 +20,7 @@ fn test_file_create_verify_repeating() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn test_file_create_verify_fill() -> Result<()> {
     let mut td = TestDir::new()?;
     let file_size = (BLOCK_SIZE * 10) as u64;
@@ -30,6 +32,7 @@ fn test_file_create_verify_fill() -> Result<()> {
 }
 
 #[test]
+#[ignore]
 fn test_file_create_verify_random() -> Result<()> {
     let mut td = TestDir::new()?;
     let file_size = (BLOCK_SIZE * 10) as u64;

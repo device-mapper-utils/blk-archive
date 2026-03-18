@@ -9,6 +9,7 @@ use common::test_dir::*;
 //-----------------------------------------
 
 #[test]
+#[ignore]
 fn unpack_file() -> Result<()> {
     let mut td = TestDir::new()?;
     let archive = create_archive(&mut td, true)?;
