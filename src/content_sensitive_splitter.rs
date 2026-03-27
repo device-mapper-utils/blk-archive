@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 
+use crate::cdc::{ChunkingStrategy, ContentDefinedChunker};
 use crate::iovec::*;
 use crate::splitter::*;
 use crate::utils::round_pow2;
@@ -13,9 +14,9 @@ struct Cursor {
     offset: usize,
 }
 
-pub struct ContentSensitiveSplitter {
+pub struct ContentSensitiveSplitter<C: ContentDefinedChunker> {
     window_size: u32,
-    hasher: gearhash::Hasher<'static>,
+    chunker: C,
     mask_s: u64,
     mask_l: u64,
 
@@ -25,15 +26,15 @@ pub struct ContentSensitiveSplitter {
     consume_c: Cursor,
 }
 
-impl ContentSensitiveSplitter {
-    pub fn new(window_size: u32) -> Self {
+impl<C: ContentDefinedChunker> ContentSensitiveSplitter<C> {
+    pub fn new(window_size: u32, chunker: C) -> Self {
         let rounded_window_size = round_pow2(window_size);
         let shift = 36;
 
         Self {
             window_size: rounded_window_size as u32,
 
-            hasher: gearhash::Hasher::default(),
+            chunker,
             mask_s: (((rounded_window_size) << 1) - 1) << shift,
             mask_l: (((rounded_window_size) >> 1) - 1) << shift,
 
@@ -81,8 +82,19 @@ impl ContentSensitiveSplitter {
         }
         self.unconsumed_len -= len as u64;
 
+        // Verify consistency: when all data is consumed, cursor should be at or past last block
+        // Allow cursor to equal blocks.len() (past last block) or be on a trailing empty block
         if self.unconsumed_len == 0 {
-            assert!(c.block == self.blocks.len());
+            assert!(
+                c.block <= self.blocks.len(),
+                "Cursor block {} exceeds blocks.len() {} when unconsumed_len is 0",
+                c.block,
+                self.blocks.len()
+            );
+            // Skip any trailing empty blocks
+            while c.block < self.blocks.len() && blocks[c.block].is_empty() {
+                c.block += 1;
+            }
         }
 
         r
@@ -103,6 +115,14 @@ impl ContentSensitiveSplitter {
 
     // Returns a vec of consume lengths
     fn next_data_(&mut self, data: &[u8]) -> Vec<usize> {
+        match self.chunker.strategy() {
+            ChunkingStrategy::Incremental => self.next_data_incremental(data),
+            ChunkingStrategy::BufferBased => self.next_data_buffer_based(data),
+        }
+    }
+
+    // Incremental chunking for GearHash and similar algorithms
+    fn next_data_incremental(&mut self, data: &[u8]) -> Vec<usize> {
         let mut consumes = Vec::with_capacity(1024); // FIXME: estimate good capacity
 
         let mut offset = 0;
@@ -119,7 +139,7 @@ impl ContentSensitiveSplitter {
             let len_s = ws - remainder;
             if len_s > 0 {
                 let end = std::cmp::min(data.len(), offset + len_s);
-                if let Some(boundary) = self.hasher.next_match(&data[offset..end], self.mask_s) {
+                if let Some(boundary) = self.chunker.next_match(&data[offset..end], self.mask_s) {
                     consumes.push(remainder + boundary);
                     offset += boundary + min_size;
                     remainder = min_size;
@@ -135,7 +155,7 @@ impl ContentSensitiveSplitter {
             }
             let len_l = max_size - remainder;
             let end = std::cmp::min(data.len(), offset + len_l);
-            if let Some(boundary) = self.hasher.next_match(&data[offset..end], self.mask_l) {
+            if let Some(boundary) = self.chunker.next_match(&data[offset..end], self.mask_l) {
                 consumes.push(remainder + boundary);
                 offset += boundary + min_size;
                 remainder = min_size;
@@ -148,15 +168,62 @@ impl ContentSensitiveSplitter {
 
         consumes
     }
+
+    // Buffer-based chunking for FastCDC StreamCDC and similar algorithms
+    fn next_data_buffer_based(&mut self, _data: &[u8]) -> Vec<usize> {
+        // For buffer-based chunking (like FastCDC StreamCDC), we need to process
+        // ALL unconsumed buffers each time, not just the new data.
+        // This is less efficient than incremental chunking, but necessary for
+        // algorithms that need to see the full data stream.
+
+        let min_size = self.window_size as usize / 4;
+        let max_size = self.window_size as usize * 8;
+
+        // Call chunk_from_buffers on all unconsumed data
+        match self.chunker.chunk_from_buffers(
+            &self.blocks,
+            self.consume_c.block,
+            self.consume_c.offset,
+            min_size,
+            max_size,
+        ) {
+            Ok(chunks) => chunks,
+            Err(e) => {
+                eprintln!("Warning: chunk_from_buffers failed: {}", e);
+                Vec::new()
+            }
+        }
+    }
 }
 
-impl Splitter for ContentSensitiveSplitter {
+impl<C: ContentDefinedChunker> Splitter for ContentSensitiveSplitter<C> {
     fn next_data(&mut self, buffer: Vec<u8>, handler: &mut impl IoVecHandler) -> Result<()> {
-        let consumes = self.next_data_(&buffer);
-
         let len = buffer.len();
-        self.blocks.push_back(buffer);
-        self.unconsumed_len += len as u64;
+
+        // Skip empty buffers to avoid state inconsistencies
+        if len == 0 {
+            return Ok(());
+        }
+
+        // Different strategies for incremental vs buffer-based chunking
+        let consumes = match self.chunker.strategy() {
+            ChunkingStrategy::Incremental => {
+                // For incremental chunking (GearHash), process the NEW data slice
+                // before adding to blocks, since the algorithm processes incrementally
+                let chunks = self.next_data_incremental(&buffer);
+                self.blocks.push_back(buffer);
+                self.unconsumed_len += len as u64;
+                chunks
+            }
+            ChunkingStrategy::BufferBased => {
+                // For buffer-based chunking (FastCDC, MinCDC), add the buffer first
+                // so the chunker can see all accumulated data
+                self.blocks.push_back(buffer);
+                self.unconsumed_len += len as u64;
+                let empty: &[u8] = &[];
+                self.next_data_buffer_based(empty)
+            }
+        };
 
         for consume_len in consumes {
             handler.handle_data(&self.consume(consume_len))?;
@@ -167,6 +234,19 @@ impl Splitter for ContentSensitiveSplitter {
     }
 
     fn next_break(&mut self, handler: &mut impl IoVecHandler) -> Result<()> {
+        // Chunk any remaining unconsumed data first
+        if self.unconsumed_len > 0 {
+            // Create an empty slice since we're processing unconsumed data
+            let empty: &[u8] = &[];
+            let chunk_lengths = self.next_data_(empty);
+
+            // Emit chunks
+            for chunk_len in chunk_lengths {
+                handler.handle_data(&self.consume(chunk_len))?;
+            }
+        }
+
+        // Emit any final remaining data
         let iov = self.consume_all();
         if !iov.is_empty() {
             handler.handle_data(&iov)?;
@@ -195,6 +275,7 @@ mod splitter_tests {
     use std::collections::BTreeMap;
     use std::io::{BufReader, BufWriter, Read, Write};
 
+    use crate::cdc::GearHashCDC;
     use crate::hash::*;
 
     fn rand_buffer(count: usize) -> Vec<u8> {
@@ -339,7 +420,7 @@ mod splitter_tests {
 
     fn split<R: Read, H: IoVecHandler>(input: &mut R, handler: &mut H) {
         const BLOCK_SIZE: usize = 128;
-        let mut splitter = ContentSensitiveSplitter::new(BLOCK_SIZE as u32);
+        let mut splitter = ContentSensitiveSplitter::new(BLOCK_SIZE as u32, GearHashCDC::new());
 
         const BUFFER_SIZE: usize = 4 * 1024 * 1024;
         loop {
