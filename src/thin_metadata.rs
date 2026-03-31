@@ -33,41 +33,41 @@ fn collect_dm_devs(dm: &mut DM) -> Result<DevMap> {
 
 // FIXME: this duplicates a lot of the work done when reading the mappings
 pub fn is_thin_device<P: AsRef<Path>>(path: P) -> Result<bool> {
-    let thin = OpenOptions::new()
-        .read(true)
-        .write(false)
-        .create(false)
-        .open(path)?;
+    let p = path.as_ref();
 
-    let metadata = thin.metadata()?;
+    let meta = {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(p)
+            .with_context(|| format!("failed to open {:?}", p))?;
+        file.metadata()
+            .with_context(|| format!("failed to read metadata for {:?}", p))?
+    };
 
-    if !metadata.file_type().is_block_device() {
+    if !meta.file_type().is_block_device() {
         // Not a block device
         return Ok(false);
     }
 
-    // Get the major:minor of the device at the given path
-    let mut dm = DM::new()?;
-    let rdev = metadata.rdev();
-    let thin_dev = Device::from(rdev);
-    let dm_devs = collect_dm_devs(&mut dm)?;
-
-    let dm_name = dm_devs.get(&(thin_dev.major, thin_dev.minor));
-    if dm_name.is_none() {
-        // Not a dm device
+    // DM init failure => not a thin device
+    let Ok(mut dm) = DM::new() else {
         return Ok(false);
-    }
+    };
 
-    let thin_name = dm_name.unwrap().clone();
-    let thin_id = DevId::Name(&thin_name);
+    let dev = Device::from(meta.rdev());
 
-    // Confirm this is a thin device
-    let mut dm = DM::new()?;
+    let dm_devices = collect_dm_devs(&mut dm).context("failed to collect dm-mapper devices")?;
 
-    match get_table(&mut dm, &thin_id, "thin") {
-        Ok(thin_args) => Ok(parse_thin_table(&thin_args).is_ok()),
-        Err(_e) => Ok(false),
-    }
+    let Some(thin_name) = dm_devices.get(&(dev.major, dev.minor)) else {
+        return Ok(false);
+    };
+
+    let thin_id = DevId::Name(thin_name);
+
+    let thin_args = get_table(&mut dm, &thin_id, "thin")
+        .with_context(|| format!("failed to get thin table for {:?}", thin_name))?;
+
+    Ok(parse_thin_table(&thin_args).is_ok())
 }
 
 //---------------------------------
