@@ -7,10 +7,10 @@ use serde_json::to_string_pretty;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::output::Output;
+use crate::paths::*;
 use crate::slab::builder::*;
 use crate::slab::*;
 use crate::stack::*;
@@ -887,15 +887,15 @@ fn unpack_instructions(buf: &[u8]) -> Result<Vec<MapInstruction>> {
 
 //-----------------------------------------
 
-pub struct StreamIter {
-    file: SlabFile,
+pub struct StreamIter<'a> {
+    file: SlabFile<'a>,
     slab: u32,
     entries: Vec<MapEntry>,
     index: usize,
 }
 
-impl StreamIter {
-    pub fn new(mut file: SlabFile) -> Result<Self> {
+impl<'a> StreamIter<'a> {
+    pub fn new(mut file: SlabFile<'a>) -> Result<Self> {
         let entries = Self::read_slab(&mut file, 0)?;
         Ok(Self {
             file,
@@ -924,7 +924,7 @@ impl StreamIter {
     }
 }
 
-impl Iterator for StreamIter {
+impl<'a> Iterator for StreamIter<'a> {
     type Item = Result<MapEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -980,15 +980,14 @@ struct Stats {
 }
 
 pub struct Dumper {
-    stream_file: SlabFile,
+    stream_file: SlabFile<'static>,
     vm_state: VMState,
     stats: Stats,
 }
 
 impl Dumper {
-    // Assumes current directory is the root of the archive.
-    pub fn new(stream: &str) -> Result<Self> {
-        let stream_path: PathBuf = ["streams", stream, "stream"].iter().collect();
+    pub fn new(archive_dir: &std::path::Path, stream: &str) -> Result<Self> {
+        let stream_path = stream_path(archive_dir, stream);
         let stream_file = SlabFileBuilder::open(stream_path).build()?;
 
         Ok(Self {

@@ -149,7 +149,19 @@ pub fn build_cli() -> clap::Command {
                         .help_heading("Optional Options"),
                 )
                 .arg(data_cache_size.clone())
-                .arg(json.clone()),
+                .arg(json.clone())
+                .arg(
+                    Arg::new("SYNC_POINT_SECS")
+                        .help("Number of seconds before creating a sync point in the archive. Smaller \
+                              values allow you to restart a pack with less data needing to be added to \
+                              archive at the cost of slower pack times")
+                        .required(false)
+                        .long("sync-point-secs")
+                        .value_name("SYNC_POINT_SECS")
+                        .num_args(1)
+                        .default_value("15")
+                        .value_parser(clap::value_parser!(u64).range(1..)),
+                ),
         )
         .subcommand(
             Command::new("unpack")
